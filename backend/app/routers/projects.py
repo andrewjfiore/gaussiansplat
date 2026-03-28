@@ -1,10 +1,7 @@
-import json
 import logging
-import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
 import httpx
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form

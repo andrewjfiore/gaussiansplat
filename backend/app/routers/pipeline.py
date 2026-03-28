@@ -11,7 +11,6 @@ from ..pipeline.task_runner import task_runner
 from ..services import ffmpeg as ffmpeg_svc
 from ..services import colmap as colmap_svc
 from ..services import trainer as trainer_svc
-from ..ws.manager import manager
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +38,8 @@ async def _update_step(pid: str, step: PipelineStep, error: str | None = None):
 
 
 @router.post("/extract-frames")
-async def extract_frames(project_id: str, body: ExtractSettings = ExtractSettings()):
+async def extract_frames(project_id: str, body: ExtractSettings | None = None):
+    body = body or ExtractSettings()
     proj = _project_dir(project_id)
     if not proj.exists():
         raise HTTPException(404, "Project not found")
@@ -67,7 +67,7 @@ async def extract_frames(project_id: str, body: ExtractSettings = ExtractSetting
                 timeout=600,  # 10 min max for frame extraction
             )
             if rc == 0:
-                frame_count = len(list(frames_dir.glob("*.jpg")))
+                frame_count = sum(1 for _ in frames_dir.glob("*.jpg"))
                 db2 = await get_db()
                 try:
                     await db2.execute(
@@ -88,7 +88,8 @@ async def extract_frames(project_id: str, body: ExtractSettings = ExtractSetting
 
 
 @router.post("/sfm")
-async def run_sfm(project_id: str, body: SfmSettings = SfmSettings()):
+async def run_sfm(project_id: str, body: SfmSettings | None = None):
+    body = body or SfmSettings()
     proj = _project_dir(project_id)
     if not proj.exists():
         raise HTTPException(404, "Project not found")
@@ -168,7 +169,8 @@ async def run_sfm(project_id: str, body: SfmSettings = SfmSettings()):
 
 
 @router.post("/train")
-async def train_splat(project_id: str, body: TrainSettings = TrainSettings()):
+async def train_splat(project_id: str, body: TrainSettings | None = None):
+    body = body or TrainSettings()
     proj = _project_dir(project_id)
     if not proj.exists():
         raise HTTPException(404, "Project not found")
