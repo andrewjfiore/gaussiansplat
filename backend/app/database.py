@@ -1,5 +1,4 @@
 import aiosqlite
-from pathlib import Path
 from .config import settings
 
 _DB_INIT = """
