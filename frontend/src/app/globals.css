@@ -1,0 +1,83 @@
+@import "tailwindcss";
+
+/* Light mode overrides — dark is the default */
+html.light {
+  --bg-primary: #f9fafb;
+  --bg-secondary: #ffffff;
+  --bg-tertiary: #f3f4f6;
+  --bg-input: #ffffff;
+  --border-color: #d1d5db;
+  --border-subtle: #e5e7eb;
+  --text-primary: #111827;
+  --text-secondary: #374151;
+  --text-muted: #6b7280;
+  --text-faint: #9ca3af;
+}
+
+html.dark {
+  --bg-primary: #111827;
+  --bg-secondary: #1f2937;
+  --bg-tertiary: #030712;
+  --bg-input: #111827;
+  --border-color: #374151;
+  --border-subtle: #1f2937;
+  --text-primary: #f3f4f6;
+  --text-secondary: #d1d5db;
+  --text-muted: #9ca3af;
+  --text-faint: #6b7280;
+}
+
+/* Apply theme variables to base elements */
+html.light body {
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+}
+
+/* Override Tailwind bg/text classes for light mode */
+html.light .bg-gray-900 { background-color: var(--bg-primary); }
+html.light .bg-gray-950 { background-color: var(--bg-tertiary); }
+html.light .bg-gray-800 { background-color: var(--bg-secondary); }
+html.light .border-gray-800,
+html.light .border-gray-700 { border-color: var(--border-color); }
+html.light .divide-gray-700 > :not(:last-child) { border-color: var(--border-color); }
+html.light .text-gray-100 { color: var(--text-primary); }
+html.light .text-gray-300 { color: var(--text-secondary); }
+html.light .text-gray-400 { color: var(--text-muted); }
+html.light .text-gray-500 { color: var(--text-faint); }
+html.light .text-white { color: var(--text-primary); }
+html.light .placeholder-gray-500::placeholder { color: var(--text-faint); }
+
+/* Light mode form inputs */
+html.light .bg-gray-900 input,
+html.light .bg-gray-900 select,
+html.light input.bg-gray-800,
+html.light select.bg-gray-900 {
+  background-color: var(--bg-input);
+  border-color: var(--border-color);
+  color: var(--text-primary);
+}
+
+/* Light mode log panel */
+html.light .bg-gray-950 {
+  background-color: #f3f4f6;
+}
+html.light .text-green-400 {
+  color: #047857;
+}
+
+/* Hover states */
+html.light .hover\:text-white:hover { color: var(--text-primary); }
+html.light .hover\:bg-gray-700:hover { background-color: #e5e7eb; }
+html.light .hover\:bg-gray-600:hover { background-color: #d1d5db; }
+html.light .hover\:border-gray-600:hover { border-color: #9ca3af; }
+html.light .hover\:border-gray-500:hover { border-color: #6b7280; }
+
+/* Cards in light mode */
+html.light .bg-gray-800.rounded-lg {
+  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+}
+
+/* Step indicator light mode */
+html.light .bg-blue-50 { background-color: #eff6ff; }
+html.light .border-gray-300 { border-color: #d1d5db; }
+html.light .bg-gray-200 { background-color: #e5e7eb; }
