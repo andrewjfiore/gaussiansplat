@@ -3,11 +3,15 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+# Path to the bundled training script
+# __file__ = backend/app/services/trainer.py  →  parents[2] = backend/
+_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "train_splat.py"
+
 
 def build_train_cmd(data_dir: Path, result_dir: Path, max_steps: int = 7000) -> list[str]:
     result_dir.mkdir(parents=True, exist_ok=True)
     return [
-        sys.executable, "-m", "gsplat.examples.simple_trainer",
+        sys.executable, str(_SCRIPT),
         "--data_dir", str(data_dir),
         "--result_dir", str(result_dir),
         "--max_steps", str(max_steps),
