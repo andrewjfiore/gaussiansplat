@@ -9,3 +9,5 @@ __pycache__/
 dist/
 build/
 .env
+.claude/settings.local.json
+tsconfig.tsbuildinfo
