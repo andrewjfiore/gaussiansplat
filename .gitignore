@@ -11,3 +11,5 @@ build/
 .env
 .claude/settings.local.json
 tsconfig.tsbuildinfo
+tests/logs/*.log
+.pytest_cache/
