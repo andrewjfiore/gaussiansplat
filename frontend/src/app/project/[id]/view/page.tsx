@@ -15,7 +15,7 @@ export default function ViewPage() {
     api.getProject(id).then((p) => {
       setProject(p);
       if (p.has_output) {
-        setPlyUrl(`/api/projects/${id}/output/ply/point_cloud.ply`);
+        setPlyUrl(`/api/projects/${id}/output/point_cloud.ply`);
       }
     });
   }, [id]);
