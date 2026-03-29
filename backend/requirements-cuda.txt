@@ -1,0 +1,17 @@
+# CUDA-enabled PyTorch and 3D Gaussian Splatting dependencies
+# Install with: pip install -r requirements-cuda.txt
+# The --extra-index-url below provides CUDA-enabled torch wheels.
+# Change cu124 to match your CUDA version (cu118, cu121, cu124, cu126).
+--extra-index-url https://download.pytorch.org/whl/cu124
+
+torch>=2.2.0
+torchvision>=0.17.0
+torchaudio>=2.2.0
+
+# 3D Gaussian Splatting trainer
+gsplat>=1.5.0
+
+# Common ML/vision utilities used by the training pipeline
+numpy>=1.24.0
+Pillow>=10.0.0
+tqdm>=4.66.0

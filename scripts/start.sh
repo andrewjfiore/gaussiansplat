@@ -1,10 +1,20 @@
 #!/bin/bash
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$PROJECT_ROOT"
+
+VENV="$PROJECT_ROOT/.venv"
+if [ ! -f "$VENV/bin/activate" ]; then
+    echo "ERROR: .venv not found. Run './scripts/setup.sh' first."
+    exit 1
+fi
+
 echo "=== Starting GaussianSplat Studio ==="
 
 # Start backend
-source backend/.venv/bin/activate
+source "$VENV/bin/activate"
 uvicorn backend.app.main:app --reload --host 0.0.0.0 --port 8000 &
 BACKEND_PID=$!
 
