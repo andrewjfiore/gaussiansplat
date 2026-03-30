@@ -11,9 +11,6 @@ import logging
 from pathlib import Path
 from typing import List, Tuple
 
-import cv2
-import numpy as np
-
 log = logging.getLogger(__name__)
 
 # Perspective views to extract: (theta_deg, phi_deg)
@@ -33,19 +30,22 @@ def is_equirectangular(width: int, height: int, tolerance: float = 0.05) -> bool
 
 
 def equirect_to_perspective(
-    img: np.ndarray,
+    img: "np.ndarray",
     fov_deg: float = 90,
     theta_deg: float = 0,
     phi_deg: float = 0,
     width: int = 800,
     height: int = 800,
-) -> np.ndarray:
+) -> "np.ndarray":
     """
     Extract a perspective view from an equirectangular image.
 
     theta = horizontal rotation (yaw) in degrees
     phi   = vertical rotation (pitch) in degrees
     """
+    import cv2
+    import numpy as np
+
     f = width / (2 * np.tan(np.radians(fov_deg / 2)))
     cx, cy = width / 2, height / 2
     th = np.radians(theta_deg)
@@ -84,6 +84,8 @@ def extract_perspective_crops(
     Given one equirectangular frame, produce 10 perspective JPEG crops.
     Returns list of output paths.
     """
+    import cv2
+
     img = cv2.imread(str(frame_path))
     if img is None:
         log.warning("Could not read frame: %s", frame_path)
@@ -97,7 +99,7 @@ def extract_perspective_crops(
                                        phi_deg=phi, width=crop_size, height=crop_size)
         name = f"frame_{frame_index:04d}_v{view_idx:02d}_t{int(theta):03d}_p{int(phi):+04d}.jpg"
         out_path = output_dir / name
-        cv2.imwrite(str(out_path), crop, [cv2.IMWRITE_JPEG_QUALITY, 95])
+        cv2.imwrite(str(out_path), crop, [cv2.IMWRITE_JPEG_QUALITY, 95])  # type: ignore[attr-defined]
         paths.append(out_path)
 
     return paths
