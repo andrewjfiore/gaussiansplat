@@ -266,12 +266,22 @@ class TestTrainerCommandBuilder:
         # First element should be the current Python interpreter
         assert cmd[0] == sys.executable
 
-    def test_gsplat_module(self, tmp_path):
+    def test_scaffold_mode(self, tmp_path):
         from app.services.trainer import build_train_cmd
-        cmd = build_train_cmd(tmp_path / "data", tmp_path / "results", max_steps=100)
+        cmd = build_train_cmd(tmp_path / "data", tmp_path / "results", max_steps=100, use_scaffold=True)
         joined = " ".join(cmd)
-        assert "gsplat" in joined
-        assert "simple_trainer" in joined
+        assert "train_scaffold.py" in joined
+        assert "--data_dir" in joined
+        assert "--result_dir" in joined
+        assert "--voxel_size" in joined
+
+    def test_vanilla_mode(self, tmp_path):
+        from app.services.trainer import build_train_cmd
+        cmd = build_train_cmd(tmp_path / "data", tmp_path / "results", max_steps=100, use_scaffold=False)
+        joined = " ".join(cmd)
+        assert "train_splat.py" in joined
+        assert "--data_dir" in joined
+        assert "--result_dir" in joined
 
     def test_data_dir_arg(self, tmp_path):
         from app.services.trainer import build_train_cmd

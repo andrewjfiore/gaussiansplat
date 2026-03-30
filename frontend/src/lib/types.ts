@@ -19,6 +19,7 @@ export interface ProjectSummary {
 
 export interface ProjectDetail extends ProjectSummary {
   video_filename?: string | null;
+  video_type?: "standard" | "equirectangular";
   frame_count: number;
   sfm_points: number;
   training_iterations: number;

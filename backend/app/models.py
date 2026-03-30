@@ -30,6 +30,7 @@ class ProjectSummary(BaseModel):
 
 class ProjectDetail(ProjectSummary):
     video_filename: Optional[str] = None
+    video_type: str = "standard"  # "standard" | "equirectangular"
     frame_count: int = 0
     sfm_points: int = 0
     training_iterations: int = 0
@@ -56,7 +57,9 @@ class SfmSettings(BaseModel):
 
 class TrainSettings(BaseModel):
     max_steps: int = 7000
-    strategy: str = "default"
+    use_scaffold: bool = True
+    voxel_size: float = 0.001
+    denoise_strength: str = "off"  # off | light | medium | aggressive
 
 
 class SystemDepStatus(BaseModel):

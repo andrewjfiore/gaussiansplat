@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS projects (
     step TEXT NOT NULL DEFAULT 'created',
     created_at TEXT NOT NULL,
     video_filename TEXT,
+    video_type TEXT DEFAULT 'standard',
     frame_count INTEGER DEFAULT 0,
     sfm_points INTEGER DEFAULT 0,
     training_iterations INTEGER DEFAULT 0,
@@ -15,6 +16,20 @@ CREATE TABLE IF NOT EXISTS projects (
     error TEXT
 );
 """
+
+_DB_MIGRATIONS = [
+    "ALTER TABLE projects ADD COLUMN video_type TEXT DEFAULT 'standard'",
+]
+
+
+async def run_migrations(db):
+    """Apply any missing schema migrations (idempotent)."""
+    for sql in _DB_MIGRATIONS:
+        try:
+            await db.execute(sql)
+            await db.commit()
+        except Exception:
+            pass  # Column already exists
 
 
 async def get_db() -> aiosqlite.Connection:
@@ -30,5 +45,6 @@ async def init_db():
     try:
         await db.executescript(_DB_INIT)
         await db.commit()
+        await run_migrations(db)
     finally:
         await db.close()

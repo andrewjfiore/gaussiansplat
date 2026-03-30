@@ -11,6 +11,7 @@ from ..pipeline.task_runner import task_runner
 from ..services import ffmpeg as ffmpeg_svc
 from ..services import colmap as colmap_svc
 from ..services import trainer as trainer_svc
+from ..services.denoise import denoise_point_cloud
 
 logger = logging.getLogger(__name__)
 
@@ -178,7 +179,21 @@ async def train_splat(project_id: str, body: TrainSettings | None = None):
     data_dir = proj / "colmap" / "dense"
     result_dir = proj / "output"
 
-    cmd = trainer_svc.build_train_cmd(data_dir, result_dir, body.max_steps)
+    use_scaffold     = getattr(body, "use_scaffold", True)
+    voxel_size       = getattr(body, "voxel_size", 0.001)
+    denoise_strength = getattr(body, "denoise_strength", "off")
+
+    # Apply point cloud denoising if requested
+    points3d_path = data_dir / "sparse" / "points3D.bin"
+    if denoise_strength != "off" and points3d_path.exists():
+        denoised_path = data_dir / "sparse" / "points3D.bin.denoised"
+        denoise_point_cloud(points3d_path, denoised_path, strength=denoise_strength)
+        if denoised_path.exists():
+            import shutil
+            shutil.copy2(denoised_path, points3d_path)
+
+    cmd = trainer_svc.build_train_cmd(data_dir, result_dir, body.max_steps,
+                                      use_scaffold=use_scaffold, voxel_size=voxel_size)
 
     async def run():
         try:
@@ -206,3 +221,49 @@ async def cancel_pipeline(project_id: str):
     if cancelled:
         await _update_step(project_id, PipelineStep.FAILED, "Cancelled by user")
     return {"cancelled": cancelled}
+
+
+@router.post("/extract-mesh")
+async def extract_mesh(project_id: str):
+    """
+    Kick off SuGaR mesh extraction in the background.
+    The resulting .glb will be available at GET /api/projects/{id}/mesh.
+    """
+    import sys
+    proj = _project_dir(project_id)
+    if not proj.exists():
+        raise HTTPException(404, "Project not found")
+
+    ply_path = proj / "output" / "point_cloud.ply"
+    if not ply_path.exists():
+        raise HTTPException(400, "Training not complete — no .ply found")
+
+    output_dir = proj / "output"
+    glb_path = output_dir / "mesh.glb"
+
+    async def run():
+        try:
+            sugar_script = Path(__file__).resolve().parents[3] / "scripts" / "extract_mesh.py"
+            if not sugar_script.exists():
+                # Fallback: use open3d ball-pivoting for a basic mesh
+                sugar_script = None
+
+            if sugar_script:
+                cmd = [sys.executable, str(sugar_script),
+                       "--ply", str(ply_path), "--output", str(glb_path)]
+            else:
+                # Simple fallback: convert PLY to GLB via open3d
+                cmd = [sys.executable, "-c",
+                       f"import open3d as o3d; m=o3d.io.read_point_cloud('{ply_path}'); "
+                       f"mesh,_=m.compute_convex_hull(); o3d.io.write_triangle_mesh('{glb_path}', mesh)"]
+
+            rc = await task_runner.run(
+                project_id + "_mesh", cmd, step="mesh", substep="extract",
+                timeout=3600,
+            )
+            logger.info("Mesh extraction %s for project=%s", "done" if rc == 0 else "failed", project_id)
+        except Exception as e:
+            logger.exception("Mesh extraction failed for %s", project_id)
+
+    asyncio.create_task(run())
+    return {"status": "started", "mesh_url": f"/api/projects/{project_id}/mesh"}

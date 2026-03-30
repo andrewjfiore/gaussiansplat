@@ -3,19 +3,29 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-# Path to the bundled training script
 # __file__ = backend/app/services/trainer.py  →  parents[2] = backend/
-_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "train_splat.py"
+_SCAFFOLD_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "train_scaffold.py"
+_LEGACY_SCRIPT   = Path(__file__).resolve().parents[2] / "scripts" / "train_splat.py"
 
 
-def build_train_cmd(data_dir: Path, result_dir: Path, max_steps: int = 7000) -> list[str]:
+def build_train_cmd(
+    data_dir: Path,
+    result_dir: Path,
+    max_steps: int = 7000,
+    use_scaffold: bool = True,
+    voxel_size: float = 0.001,
+) -> list[str]:
     result_dir.mkdir(parents=True, exist_ok=True)
-    return [
-        sys.executable, str(_SCRIPT),
+    script = _SCAFFOLD_SCRIPT if use_scaffold else _LEGACY_SCRIPT
+    cmd = [
+        sys.executable, str(script),
         "--data_dir", str(data_dir),
         "--result_dir", str(result_dir),
         "--max_steps", str(max_steps),
     ]
+    if use_scaffold:
+        cmd += ["--voxel_size", str(voxel_size)]
+    return cmd
 
 
 def parse_trainer_line(line: str) -> Optional[dict]:

@@ -1,5 +1,6 @@
 import json
 import logging
+import socket
 from collections import deque
 
 from fastapi import APIRouter, HTTPException, Query
@@ -97,3 +98,17 @@ async def download_logs():
         filename="gaussiansplat.log",
         media_type="text/plain",
     )
+
+
+@router.get("/local-url")
+async def get_local_url():
+    """Return the machine's LAN IP for Quest browser access."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+    except Exception:
+        ip = "127.0.0.1"
+    frontend_port = 3001
+    return {"ip": ip, "url": f"http://{ip}:{frontend_port}"}

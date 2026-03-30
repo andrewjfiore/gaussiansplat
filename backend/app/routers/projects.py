@@ -1,4 +1,5 @@
 import logging
+import subprocess
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,6 +14,8 @@ from ..models import (
     ProjectCreate, ProjectSummary, ProjectDetail, PipelineStep,
     SAMPLE_VIDEOS,
 )
+from ..services.equirect import is_equirectangular
+from ..services.compress import ensure_ksplat
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +24,29 @@ router = APIRouter(prefix="/api/projects", tags=["projects"])
 
 def _project_dir(project_id: str) -> Path:
     return settings.data_dir / project_id
+
+
+def _detect_video_type(video_path: Path) -> str:
+    """Use ffprobe to get video dimensions and detect equirectangular format."""
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "quiet", "-select_streams", "v:0",
+                "-show_entries", "stream=width,height",
+                "-of", "csv=p=0", str(video_path),
+            ],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0:
+            parts = result.stdout.strip().split(",")
+            if len(parts) == 2:
+                w, h = int(parts[0]), int(parts[1])
+                if is_equirectangular(w, h):
+                    logger.info("Detected equirectangular video: %dx%d", w, h)
+                    return "equirectangular"
+    except Exception as e:
+        logger.debug("ffprobe detection failed: %s", e)
+    return "standard"
 
 
 @router.get("", response_model=list[ProjectSummary])
@@ -96,6 +122,7 @@ async def get_project(project_id: str):
             id=row["id"], name=row["name"], step=row["step"],
             created_at=row["created_at"], error=row["error"],
             video_filename=row["video_filename"],
+            video_type=row["video_type"] or "standard",
             frame_count=frame_count,
             sfm_points=row["sfm_points"],
             training_iterations=row["training_iterations"],
@@ -139,19 +166,22 @@ async def upload_video(project_id: str, file: UploadFile = File(...)):
         while chunk := await file.read(1024 * 1024):
             f.write(chunk)
 
+    video_type = _detect_video_type(dest)
+
     db = await get_db()
     try:
         await db.execute(
-            "UPDATE projects SET video_filename = ? WHERE id = ?",
-            (filename, project_id),
+            "UPDATE projects SET video_filename = ?, video_type = ? WHERE id = ?",
+            (filename, video_type, project_id),
         )
         await db.commit()
     finally:
         await db.close()
 
     file_size = dest.stat().st_size
-    logger.info("Video uploaded: project=%s file=%s size=%d bytes", project_id, filename, file_size)
-    return {"filename": filename, "size": file_size}
+    logger.info("Video uploaded: project=%s file=%s size=%d bytes type=%s",
+                project_id, filename, file_size, video_type)
+    return {"filename": filename, "size": file_size, "video_type": video_type}
 
 
 @router.post("/{project_id}/sample")
@@ -219,3 +249,49 @@ async def get_output(project_id: str, path: str):
 @router.get("/samples/list")
 async def list_samples():
     return SAMPLE_VIDEOS
+
+
+@router.get("/{project_id}/ply")
+async def get_ply(project_id: str):
+    """Download the raw .ply splat file."""
+    output_dir = _project_dir(project_id) / "output"
+    ply_path = output_dir / "point_cloud.ply"
+    if not ply_path.exists():
+        raise HTTPException(404, "PLY not found — complete training first")
+    return FileResponse(
+        path=str(ply_path),
+        filename=f"{project_id}.ply",
+        media_type="application/x-ply",
+    )
+
+
+@router.get("/{project_id}/splat")
+async def get_splat(project_id: str):
+    """
+    Serve compressed .ksplat if available, otherwise fall back to .ply.
+    Compresses on demand if ksplat-encoder is installed.
+    """
+    output_dir = _project_dir(project_id) / "output"
+    ply_path = output_dir / "point_cloud.ply"
+    if not ply_path.exists():
+        raise HTTPException(404, "Splat not found — complete training first")
+
+    served = ensure_ksplat(ply_path)
+    suffix  = served.suffix  # .ksplat or .ply
+    media   = "application/octet-stream"
+    fname   = f"{project_id}{suffix}"
+    return FileResponse(path=str(served), filename=fname, media_type=media)
+
+
+@router.get("/{project_id}/mesh")
+async def get_mesh(project_id: str):
+    """Download the exported .glb mesh (if mesh extraction has completed)."""
+    output_dir = _project_dir(project_id) / "output"
+    glb_path = output_dir / "mesh.glb"
+    if not glb_path.exists():
+        raise HTTPException(404, "Mesh not ready — trigger extraction first")
+    return FileResponse(
+        path=str(glb_path),
+        filename=f"{project_id}.glb",
+        media_type="model/gltf-binary",
+    )
