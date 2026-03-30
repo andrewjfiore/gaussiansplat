@@ -354,3 +354,191 @@ class TestFullPipelineE2E:
         total_elapsed = time.time() - t_start
         log.info("[SLOW E2E] Full pipeline completed in %.1fs (%.1fmin)",
                  total_elapsed, total_elapsed / 60)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Equirectangular detection & perspective crop E2E
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestEquirectangularPipeline:
+    """Tests for 360° equirectangular detection and perspective crop generation."""
+
+    def test_equirect_detection_by_aspect_ratio(self, tmp_path):
+        """2:1 image → is_equirectangular returns True."""
+        from app.services.equirect import is_equirectangular
+        assert is_equirectangular(3840, 1920) is True
+        assert is_equirectangular(4096, 2048) is True
+        assert is_equirectangular(1920, 1080) is False  # 16:9, not 2:1
+        assert is_equirectangular(1920, 960) is True
+
+    def test_equirect_tolerance(self):
+        """Within 5% of 2.0 ratio is accepted."""
+        from app.services.equirect import is_equirectangular
+        # 1.96 → difference from 2.0 is 0.04, within 0.05
+        assert is_equirectangular(196, 100) is True
+        # 2.11 → difference is 0.11, exceeds 0.05
+        assert is_equirectangular(211, 100) is False
+
+    def test_perspective_crops_count(self, tmp_path):
+        """One equirect frame → exactly 10 perspective crops."""
+        import cv2
+        import numpy as np
+        from app.services.equirect import extract_perspective_crops
+
+        # Create a synthetic 2:1 equirect image (1600x800)
+        frame = tmp_path / "frame_0000.jpg"
+        img = np.random.randint(0, 255, (800, 1600, 3), dtype=np.uint8)
+        cv2.imwrite(str(frame), img)
+
+        output_dir = tmp_path / "crops"
+        crops = extract_perspective_crops(frame, output_dir, frame_index=0)
+
+        assert len(crops) == 10, f"Expected 10 crops, got {len(crops)}"
+        for p in crops:
+            assert p.exists(), f"Crop missing: {p}"
+
+    def test_perspective_crop_dimensions(self, tmp_path):
+        """Each crop is 800x800 by default."""
+        import cv2
+        import numpy as np
+        from app.services.equirect import extract_perspective_crops
+
+        frame = tmp_path / "frame_0000.jpg"
+        img = np.zeros((800, 1600, 3), dtype=np.uint8)
+        cv2.imwrite(str(frame), img)
+
+        output_dir = tmp_path / "crops"
+        crops = extract_perspective_crops(frame, output_dir, frame_index=0)
+        for p in crops:
+            crop_img = cv2.imread(str(p))
+            assert crop_img is not None
+            h, w = crop_img.shape[:2]
+            assert w == 800 and h == 800, f"Unexpected crop size {w}x{h}"
+
+    def test_process_equirect_frames_batch(self, tmp_path):
+        """process_equirect_frames produces 10 crops per frame."""
+        import cv2
+        import numpy as np
+        from app.services.equirect import process_equirect_frames
+
+        frames_dir = tmp_path / "frames"
+        frames_dir.mkdir()
+        for i in range(3):
+            img = np.random.randint(0, 255, (800, 1600, 3), dtype=np.uint8)
+            cv2.imwrite(str(frames_dir / f"frame_{i:04d}.jpg"), img)
+
+        output_dir = tmp_path / "crops"
+        total = process_equirect_frames(frames_dir, output_dir)
+        assert total == 30, f"Expected 30 crops (3 frames × 10), got {total}"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Point cloud denoising E2E
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestPointCloudDenoising:
+    """Tests for statistical outlier removal on COLMAP point clouds."""
+
+    def _make_points3d_bin(self, path, xyz, rgb):
+        """Write a minimal points3D.bin for testing."""
+        import struct
+        n = len(xyz)
+        with open(path, "wb") as f:
+            f.write(struct.pack("<Q", n))
+            for i in range(n):
+                f.write(struct.pack("<Q", i + 1))
+                f.write(struct.pack("<3d", *xyz[i]))
+                f.write(struct.pack("<3B", *rgb[i]))
+                f.write(struct.pack("<d", 0.0))   # error
+                f.write(struct.pack("<Q", 0))      # empty track
+
+    def test_denoise_off_returns_input(self, tmp_path):
+        """strength='off' returns the input path unchanged."""
+        from app.services.denoise import denoise_point_cloud
+        import numpy as np
+        xyz = np.random.randn(100, 3)
+        rgb = np.zeros((100, 3), dtype=np.uint8)
+        inp = tmp_path / "points3D.bin"
+        out = tmp_path / "points3D_out.bin"
+        self._make_points3d_bin(inp, xyz, rgb)
+        result = denoise_point_cloud(inp, out, strength="off")
+        assert result == inp
+
+    @pytest.mark.skipif(
+        not __import__("importlib").util.find_spec("open3d"),
+        reason="open3d not installed"
+    )
+    def test_denoise_removes_outliers(self, tmp_path):
+        """Statistical outlier removal should remove injected outlier points."""
+        import numpy as np
+        from app.services.denoise import denoise_point_cloud
+
+        rng = np.random.default_rng(42)
+        # 200 inliers in a tight cluster
+        inliers_xyz = rng.normal(loc=0.0, scale=0.05, size=(200, 3))
+        # 20 outliers far away
+        outliers_xyz = rng.uniform(low=50.0, high=100.0, size=(20, 3))
+        xyz = np.vstack([inliers_xyz, outliers_xyz])
+        rgb = np.zeros((len(xyz), 3), dtype=np.uint8)
+
+        inp = tmp_path / "points3D.bin"
+        out = tmp_path / "points3D_denoised.bin"
+        self._make_points3d_bin(inp, xyz, rgb)
+
+        result = denoise_point_cloud(inp, out, strength="aggressive")
+        assert result == out
+        assert out.exists()
+
+        # Read the output and verify outliers were removed
+        import struct
+        with open(out, "rb") as f:
+            (n_out,) = struct.unpack("<Q", f.read(8))
+        assert n_out < 220, f"Expected fewer than 220 points after denoising, got {n_out}"
+        assert n_out >= 150, f"Expected at least 150 inliers retained, got {n_out}"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Scaffold-GS trainer command E2E
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestScaffoldTrainerE2E:
+    """Tests for Scaffold-GS trainer command building with use_scaffold flag."""
+
+    def test_scaffold_command_contains_train_scaffold(self, tmp_path):
+        """use_scaffold=True → train_scaffold.py in command."""
+        from app.services.trainer import build_train_cmd
+        cmd = build_train_cmd(tmp_path / "data", tmp_path / "results",
+                              max_steps=100, use_scaffold=True)
+        joined = " ".join(cmd)
+        assert "train_scaffold.py" in joined
+        assert "--data_dir" in joined
+        assert "--result_dir" in joined
+        assert "--voxel_size" in joined
+
+    def test_vanilla_command_contains_train_splat(self, tmp_path):
+        """use_scaffold=False → train_splat.py in command."""
+        from app.services.trainer import build_train_cmd
+        cmd = build_train_cmd(tmp_path / "data", tmp_path / "results",
+                              max_steps=100, use_scaffold=False)
+        joined = " ".join(cmd)
+        assert "train_splat.py" in joined
+        assert "--data_dir" in joined
+        assert "--result_dir" in joined
+        # No voxel_size for vanilla
+        assert "--voxel_size" not in joined
+
+    def test_voxel_size_custom(self, tmp_path):
+        """Custom voxel_size is passed through."""
+        from app.services.trainer import build_train_cmd
+        cmd = build_train_cmd(tmp_path / "data", tmp_path / "results",
+                              max_steps=100, use_scaffold=True, voxel_size=0.005)
+        joined = " ".join(cmd)
+        assert "0.005" in joined
+
+    def test_max_steps_in_command(self, tmp_path):
+        """max_steps is passed as --max_steps argument."""
+        from app.services.trainer import build_train_cmd
+        cmd = build_train_cmd(tmp_path / "data", tmp_path / "results",
+                              max_steps=5000, use_scaffold=True)
+        assert "--max_steps" in cmd
+        assert "5000" in cmd
