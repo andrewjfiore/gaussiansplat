@@ -82,11 +82,12 @@ export class MkkelloggRenderer implements SplatRenderer {
   }
 
   async load(url: string): Promise<void> {
-    const { GaussianSplatMesh, WebXRMode } = await import(
-      "@mkkellogg/gaussian-splats-3d"
-    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const mod = await import("@mkkellogg/gaussian-splats-3d") as any;
+    const GaussianSplatMesh = mod.GaussianSplatMesh ?? mod.default?.GaussianSplatMesh;
+    const WebXRMode = mod.WebXRMode ?? mod.default?.WebXRMode;
     this.splat = new GaussianSplatMesh(this.renderer, this.scene, this.camera, {
-      webXRMode: WebXRMode.VR,
+      webXRMode: WebXRMode?.VR ?? 1,
     });
     await this.splat.addSplatScene(url, { progressiveLoad: true });
   }
