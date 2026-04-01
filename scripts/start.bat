@@ -15,4 +15,10 @@ echo.
 echo Backend:  http://localhost:8000
 echo Frontend: http://localhost:3000
 echo.
+echo For Quest 3 access, open: http://YOUR_LAN_IP:3000/connect
+echo (Run 'ipconfig' to find your LAN IP under Wi-Fi adapter)
+echo.
+echo If Quest browser blocks HTTP, use HTTPS:
+echo   Stop servers, then run in frontend\: npm run dev:https
+echo.
 echo Close the terminal windows to stop the servers.

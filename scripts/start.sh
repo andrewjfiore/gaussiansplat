@@ -26,9 +26,20 @@ npm run dev &
 FRONTEND_PID=$!
 cd ..
 
+LAN_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+
 echo
 echo "Backend:  http://localhost:8000"
 echo "Frontend: http://localhost:3000"
+if [ -n "$LAN_IP" ]; then
+    echo
+    echo "LAN access (Quest 3):  http://$LAN_IP:3000"
+    echo "QR / instructions:     http://$LAN_IP:3000/connect"
+    echo
+    echo "If Quest browser blocks HTTP, use HTTPS instead:"
+    echo "  Stop this script, then run:"
+    echo "    cd frontend && npm run dev:https"
+fi
 echo
 echo "Press Ctrl+C to stop both servers."
 

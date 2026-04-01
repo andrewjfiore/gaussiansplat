@@ -24,6 +24,12 @@ function Header() {
             Projects
           </Link>
           <Link
+            href="/connect"
+            className="text-gray-400 hover:text-white transition"
+          >
+            Connect
+          </Link>
+          <Link
             href="/settings"
             className="text-gray-400 hover:text-white transition"
           >

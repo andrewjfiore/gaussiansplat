@@ -36,8 +36,11 @@ app = FastAPI(title=settings.project_name, lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.frontend_url, "http://localhost:3000"],
-    allow_credentials=True,
+    # Allow all origins so Quest 3 and other LAN devices can connect directly.
+    # WebSocket connects directly to port 8000 (bypasses Next.js proxy), so
+    # the origin will be the LAN IP (e.g. http://192.168.1.196:3000).
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["Content-Disposition"],
