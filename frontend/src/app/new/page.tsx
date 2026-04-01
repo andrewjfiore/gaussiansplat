@@ -32,7 +32,7 @@ export default function NewProjectPage() {
   const router = useRouter();
   const [name, setName] = useState("");
   const [tab, setTab] = useState<"upload" | "sample">("upload");
-  const [file, setFile] = useState<File | null>(null);
+  const [files, setFiles] = useState<File[]>([]);
   const [selectedSample, setSelectedSample] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -44,8 +44,8 @@ export default function NewProjectPage() {
       setError("Project name is required");
       return;
     }
-    if (tab === "upload" && !file) {
-      setError("Please select a video file");
+    if (tab === "upload" && files.length === 0) {
+      setError("Please select at least one video file");
       return;
     }
     if (tab === "sample" && !selectedSample) {
@@ -61,11 +61,13 @@ export default function NewProjectPage() {
       setStatusText("Creating project...");
       const project = await api.createProject(name);
 
-      if (tab === "upload" && file) {
-        setStatusText("Uploading video...");
-        await api.uploadVideo(project.id, file, (pct) => {
-          setUploadPercent(pct);
-        });
+      if (tab === "upload" && files.length > 0) {
+        for (let i = 0; i < files.length; i++) {
+          setStatusText(`Uploading video ${i + 1}/${files.length}...`);
+          await api.uploadVideo(project.id, files[i], (pct) => {
+            setUploadPercent(pct);
+          });
+        }
       } else if (tab === "sample" && selectedSample) {
         setStatusText("Downloading sample video...");
         await api.downloadSample(project.id, selectedSample);
@@ -123,43 +125,76 @@ export default function NewProjectPage() {
           </div>
 
           {tab === "upload" && (
-            <div
-              className="border-2 border-dashed border-gray-700 rounded-lg p-8 text-center hover:border-gray-500 transition cursor-pointer"
-              onClick={() =>
-                document.getElementById("file-input")?.click()
-              }
-              onDragOver={(e) => e.preventDefault()}
-              onDrop={(e) => {
-                e.preventDefault();
-                const f = e.dataTransfer.files[0];
-                if (f) setFile(f);
-              }}
-            >
-              <input
-                id="file-input"
-                type="file"
-                accept="video/*"
-                className="hidden"
-                onChange={(e) =>
-                  setFile(e.target.files?.[0] || null)
+            <div>
+              <div
+                className="border-2 border-dashed border-gray-700 rounded-lg p-8 text-center hover:border-gray-500 transition cursor-pointer"
+                onClick={() =>
+                  document.getElementById("file-input")?.click()
                 }
-              />
-              {file ? (
-                <div>
-                  <p className="text-white font-medium">{file.name}</p>
-                  <p className="text-gray-400 text-sm mt-1">
-                    {(file.size / 1024 / 1024).toFixed(1)} MB
-                  </p>
-                </div>
-              ) : (
-                <div>
-                  <Upload className="w-10 h-10 text-gray-600 mx-auto mb-3" />
-                  <p className="text-gray-400">
-                    Drag & drop a video or click to browse
-                  </p>
-                  <p className="text-gray-500 text-sm mt-1">
-                    .mp4, .mov, .avi supported
-                  </p>
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  const dropped = Array.from(e.dataTransfer.files).filter(
+                    (f) => f.type.startsWith("video/")
+                  );
+                  if (dropped.length > 0)
+                    setFiles((prev) => [...prev, ...dropped]);
+                }}
+              >
+                <input
+                  id="file-input"
+                  type="file"
+                  accept="video/*"
+                  multiple
+                  className="hidden"
+                  onChange={(e) => {
+                    const selected = Array.from(e.target.files || []);
+                    if (selected.length > 0)
+                      setFiles((prev) => [...prev, ...selected]);
+                  }}
+                />
+                {files.length > 0 ? (
+                  <div>
+                    <p className="text-white font-medium">
+                      {files.length} video{files.length > 1 ? "s" : ""} selected
+                    </p>
+                    <p className="text-gray-500 text-sm mt-1">
+                      Click or drop to add more
+                    </p>
+                  </div>
+                ) : (
+                  <div>
+                    <Upload className="w-10 h-10 text-gray-600 mx-auto mb-3" />
+                    <p className="text-gray-400">
+                      Drag & drop video(s) or click to browse
+                    </p>
+                    <p className="text-gray-500 text-sm mt-1">
+                      .mp4, .mov, .avi — multiple videos supported for multi-cam
+                    </p>
+                  </div>
+                )}
+              </div>
+              {files.length > 0 && (
+                <div className="mt-3 space-y-1">
+                  {files.map((f, i) => (
+                    <div
+                      key={`${f.name}-${i}`}
+                      className="flex items-center justify-between bg-gray-800 rounded px-3 py-1.5 text-sm"
+                    >
+                      <span className="text-white truncate mr-2">{f.name}</span>
+                      <div className="flex items-center gap-2 text-gray-400 text-xs">
+                        <span>{(f.size / 1024 / 1024).toFixed(1)} MB</span>
+                        <button
+                          onClick={() =>
+                            setFiles((prev) => prev.filter((_, j) => j !== i))
+                          }
+                          className="text-red-400 hover:text-red-300"
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    </div>
+                  ))}
                 </div>
               )}
             </div>

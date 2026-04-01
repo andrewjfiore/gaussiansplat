@@ -13,3 +13,6 @@ build/
 tsconfig.tsbuildinfo
 tests/logs/*.log
 .pytest_cache/
+fullquality_run/
+test_run/
+video/

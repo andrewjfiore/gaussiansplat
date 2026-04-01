@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+
 import aiosqlite
 from .config import settings
 
@@ -15,10 +17,23 @@ CREATE TABLE IF NOT EXISTS projects (
     has_output INTEGER DEFAULT 0,
     error TEXT
 );
+
+CREATE TABLE IF NOT EXISTS project_videos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id TEXT NOT NULL,
+    video_index INTEGER NOT NULL,
+    filename TEXT NOT NULL,
+    video_type TEXT DEFAULT 'standard',
+    uploaded_at TEXT NOT NULL,
+    UNIQUE(project_id, video_index)
+);
 """
 
 _DB_MIGRATIONS = [
     "ALTER TABLE projects ADD COLUMN video_type TEXT DEFAULT 'standard'",
+    "ALTER TABLE projects ADD COLUMN sfm_registered_images INTEGER DEFAULT 0",
+    "ALTER TABLE projects ADD COLUMN sfm_reprojection_error REAL DEFAULT 0.0",
+    "ALTER TABLE projects ADD COLUMN temporal_mode TEXT DEFAULT 'static'",
 ]
 
 
@@ -37,6 +52,22 @@ async def get_db() -> aiosqlite.Connection:
     db.row_factory = aiosqlite.Row
     await db.execute("PRAGMA journal_mode=WAL")
     return db
+
+
+@asynccontextmanager
+async def db_session():
+    """Async context manager: auto-commits on success, rolls back on error."""
+    db = await aiosqlite.connect(str(settings.db_path))
+    db.row_factory = aiosqlite.Row
+    await db.execute("PRAGMA journal_mode=WAL")
+    try:
+        yield db
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+    finally:
+        await db.close()
 
 
 async def init_db():

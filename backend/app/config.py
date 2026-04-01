@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     port: int = 8000
     db_path: Path = _ROOT / "data" / "gaussiansplat.db"
     log_dir: Path = _ROOT / "data" / "logs"
+    max_concurrent_gpu_tasks: int = 1
 
     @property
     def log_file(self) -> Path:

@@ -7,7 +7,8 @@ import { useElapsedTimer } from "@/hooks/useElapsedTimer";
 import { LogStream } from "@/components/LogStream";
 import { FrameGrid } from "@/components/FrameGrid";
 import type { FrameInfo, ProjectDetail } from "@/lib/types";
-import { Play, ArrowRight, Loader2, XCircle, RotateCcw, Clock, Settings2 } from "lucide-react";
+import { Play, ArrowRight, ArrowLeft, Loader2, XCircle, RotateCcw, Clock, Settings2, Volume2, VolumeX } from "lucide-react";
+import { useCompletionChime } from "@/hooks/useCompletionChime";
 
 const FPS_OPTIONS = [
   { value: 1, label: "1 fps", desc: "Fewer frames, faster processing" },
@@ -26,6 +27,9 @@ export default function FramesPage() {
   const [starting, setStarting] = useState(false);
   const [fps, setFps] = useState(2);
   const [showSettings, setShowSettings] = useState(false);
+  const { muted, setMuted, onStepChange } = useCompletionChime();
+
+  useEffect(() => { onStepChange(project?.step); }, [project?.step, onStepChange]);
 
   const isExtracting = project?.step === "extracting_frames";
   const isFailed = project?.step === "failed";
@@ -166,12 +170,21 @@ export default function FramesPage() {
           </>
         )}
         {isDone && (
-          <button
-            onClick={() => router.push(`/project/${id}/sfm`)}
-            className="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 transition"
-          >
-            Continue to SfM <ArrowRight className="w-4 h-4" />
-          </button>
+          <>
+            <button
+              onClick={handleRetry}
+              disabled={starting}
+              className="bg-gray-600 hover:bg-gray-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 transition"
+            >
+              <RotateCcw className="w-4 h-4" /> Redo
+            </button>
+            <button
+              onClick={() => router.push(`/project/${id}/sfm`)}
+              className="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 transition"
+            >
+              Continue to SfM <ArrowRight className="w-4 h-4" />
+            </button>
+          </>
         )}
       </div>
 

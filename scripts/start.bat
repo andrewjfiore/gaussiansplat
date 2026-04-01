@@ -3,7 +3,7 @@ echo === Starting GaussianSplat Studio ===
 echo.
 
 :: Start backend
-start "GS-Backend" cmd /k "cd /d %~dp0.. && call backend\.venv\Scripts\activate.bat && python -m uvicorn backend.app.main:app --reload --host 0.0.0.0 --port 8000"
+start "GS-Backend" cmd /k "cd /d %~dp0.. && call .venv\Scripts\activate.bat && python -m uvicorn backend.app.main:app --host 0.0.0.0 --port 8000"
 
 :: Wait a moment for backend to start
 timeout /t 3 /nobreak > nul

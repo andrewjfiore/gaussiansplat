@@ -1,9 +1,9 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  // Allow large video uploads (default is 1MB which breaks everything)
-  serverActions: {
-    bodySizeLimit: "500mb",
+  experimental: {
+    // Allow large video uploads through the rewrite proxy (default is 10 MB)
+    middlewareClientMaxBodySize: "500mb",
   },
   async rewrites() {
     return [

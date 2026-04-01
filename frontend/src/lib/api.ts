@@ -32,6 +32,7 @@ export const api = {
   ) => {
     return new Promise<any>((resolve, reject) => {
       const xhr = new XMLHttpRequest();
+      // Route through Next.js proxy (middlewareClientMaxBodySize handles large files)
       xhr.open("POST", `/api/projects/${id}/upload`);
 
       xhr.upload.onprogress = (e) => {
@@ -80,21 +81,39 @@ export const api = {
       method: "POST",
       body: JSON.stringify(opts || {}),
     }),
-  runSfm: (id: string, opts?: { matcher_type?: string }) =>
+  runSfm: (id: string, opts?: { matcher_type?: string; enable_dense?: boolean }) =>
     request<any>(`/api/projects/${id}/pipeline/sfm`, {
       method: "POST",
       body: JSON.stringify(opts || {}),
     }),
-  train: (id: string, opts?: { max_steps?: number }) =>
+  train: (id: string, opts?: import("@/lib/types").TrainSettings) =>
     request<any>(`/api/projects/${id}/pipeline/train`, {
+      method: "POST",
+      body: JSON.stringify(opts || {}),
+    }),
+  getTemporalInfo: (id: string) =>
+    request<import("@/lib/types").TemporalInfo>(`/api/projects/${id}/temporal-info`),
+  refineSplat: (id: string, opts?: { diffusion_inpaint?: boolean; refine_steps?: number }) =>
+    request<any>(`/api/projects/${id}/pipeline/refine`, {
       method: "POST",
       body: JSON.stringify(opts || {}),
     }),
   cancelPipeline: (id: string) =>
     request<any>(`/api/projects/${id}/pipeline/cancel`, { method: "POST" }),
+  pipelineHealth: (id: string) =>
+    request<{ running: boolean; step: string; stale: boolean; error: string | null }>(
+      `/api/projects/${id}/pipeline/health`
+    ),
+
+  // Videos
+  listVideos: (id: string) =>
+    request<import("@/lib/types").VideoInfo[]>(`/api/projects/${id}/videos`),
 
   // Frames
   listFrames: (id: string) => request<any[]>(`/api/projects/${id}/frames`),
+
+  // Checkpoints (for comparison view)
+  listCheckpoints: (id: string) => request<any[]>(`/api/projects/${id}/checkpoints`),
 
   // System
   systemStatus: () => request<any>("/api/system/status"),

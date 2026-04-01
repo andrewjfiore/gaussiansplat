@@ -1,19 +1,44 @@
 "use client";
 import { useEffect, useRef, useState, useCallback } from "react";
 import { createRenderer, SplatRenderer } from "@/lib/renderers";
+import PerformanceOverlay from "./PerformanceOverlay";
+import RelightControls from "./RelightControls";
+import { Palette } from "lucide-react";
+
+type BgMode = "black" | "darkgray" | "white" | "checker";
+
+const BG_CYCLE: BgMode[] = ["black", "darkgray", "white", "checker"];
+
+const BG_COLORS: Record<BgMode, string> = {
+  black: "#000000",
+  darkgray: "#1a1a1a",
+  white: "#ffffff",
+  checker: "#1a1a1a",
+};
+
+const BG_LABELS: Record<BgMode, string> = {
+  black: "Black",
+  darkgray: "Dark Gray",
+  white: "White",
+  checker: "Checkerboard",
+};
 
 interface Props {
   plyUrl: string;
   ksplatUrl?: string;
+  format?: number;
 }
 
-export function SplatViewerFPS({ plyUrl, ksplatUrl }: Props) {
+export function SplatViewerFPS({ plyUrl, ksplatUrl, format }: Props) {
   const mountRef    = useRef<HTMLDivElement>(null);
   const rendererRef = useRef<SplatRenderer | null>(null);
   const [rendererType, setRendererType] = useState<"webgpu" | "webgl">("webgl");
   const [fpsMode, setFpsMode]           = useState(false);
   const [loading, setLoading]           = useState(true);
   const [error, setError]               = useState<string | null>(null);
+  const [showStats, setShowStats]       = useState(false);
+  const [showRelight, setShowRelight]   = useState(false);
+  const [bgMode, setBgMode]             = useState<BgMode>("black");
 
   useEffect(() => {
     if (!mountRef.current) return;
@@ -25,8 +50,8 @@ export function SplatViewerFPS({ plyUrl, ksplatUrl }: Props) {
         if (disposed) { r.dispose(); return; }
         rendererRef.current = r;
         setRendererType(r.type);
-        await r.load(url);
-        setLoading(false);
+        await r.load(url, format);
+        if (!disposed) setLoading(false);
       })
       .catch((err) => {
         if (!disposed) setError(String(err));
@@ -38,7 +63,7 @@ export function SplatViewerFPS({ plyUrl, ksplatUrl }: Props) {
       rendererRef.current?.dispose();
       rendererRef.current = null;
     };
-  }, [plyUrl, ksplatUrl]);
+  }, [plyUrl, ksplatUrl, format]);
 
   const toggleFPS = useCallback(() => {
     const r = rendererRef.current;
@@ -50,6 +75,14 @@ export function SplatViewerFPS({ plyUrl, ksplatUrl }: Props) {
 
   const enterVR = useCallback(() => {
     rendererRef.current?.enterVR();
+  }, []);
+
+  const cycleBg = useCallback(() => {
+    setBgMode((prev) => {
+      const next = BG_CYCLE[(BG_CYCLE.indexOf(prev) + 1) % BG_CYCLE.length];
+      rendererRef.current?.setBackgroundColor(BG_COLORS[next]);
+      return next;
+    });
   }, []);
 
   return (
@@ -64,7 +97,7 @@ export function SplatViewerFPS({ plyUrl, ksplatUrl }: Props) {
           alignItems: "center", justifyContent: "center",
           background: "rgba(0,0,0,0.7)", color: "white", fontSize: 16,
         }}>
-          Loading splat…
+          Loading splat...
         </div>
       )}
 
@@ -111,7 +144,57 @@ export function SplatViewerFPS({ plyUrl, ksplatUrl }: Props) {
           >
             Enter VR
           </button>
+          <button
+            onClick={() => setShowStats((s) => !s)}
+            style={{
+              background: showStats ? "#3b82f6" : "rgba(0,0,0,0.55)",
+              color: "white", border: "none", borderRadius: 4,
+              padding: "4px 12px", fontSize: 12, cursor: "pointer",
+            }}
+          >
+            Stats
+          </button>
+          <button
+            onClick={() => setShowRelight((s) => !s)}
+            style={{
+              background: showRelight ? "#f59e0b" : "rgba(0,0,0,0.55)",
+              color: "white", border: "none", borderRadius: 4,
+              padding: "4px 12px", fontSize: 12, cursor: "pointer",
+            }}
+          >
+            Relight
+          </button>
+          <button
+            onClick={cycleBg}
+            title={`Background: ${BG_LABELS[bgMode]}`}
+            style={{
+              background: "rgba(0,0,0,0.55)", color: "white",
+              border: "none", borderRadius: 4,
+              padding: "4px 8px", fontSize: 12, cursor: "pointer",
+              display: "flex", alignItems: "center",
+            }}
+          >
+            <Palette style={{ width: 14, height: 14 }} />
+          </button>
         </div>
+      )}
+
+      {/* Performance overlay */}
+      {!loading && !error && (
+        <PerformanceOverlay
+          getStats={() => rendererRef.current?.getStats() ?? null}
+          visible={showStats}
+        />
+      )}
+
+      {/* Relight controls */}
+      {!loading && !error && (
+        <RelightControls
+          visible={showRelight}
+          onLightChange={(dir, intensity, ambient) => {
+            rendererRef.current?.setLighting(dir, intensity, ambient);
+          }}
+        />
       )}
 
       {/* WASD hint */}

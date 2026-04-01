@@ -1,18 +1,98 @@
 import asyncio
+import glob
+import os
 import subprocess
 import sys
 from pathlib import Path
 from typing import Callable, Optional
 from ..ws.manager import manager
+from ..config import settings
 
 # Maximum time (seconds) a single subprocess can run before being killed
 DEFAULT_TIMEOUT = 3600  # 1 hour
 READLINE_TIMEOUT = 300  # 5 min without any output = considered hung
 
 
+def _build_gpu_env() -> dict[str, str]:
+    """Build environment dict with MSVC + CUDA paths for JIT compilation on Windows."""
+    env = os.environ.copy()
+    if sys.platform != "win32":
+        return env
+
+    # Find MSVC
+    vs_base = Path(r"C:\Program Files (x86)\Microsoft Visual Studio")
+    msvc_bin = None
+    msvc_root = None
+    for edition in ("BuildTools", "Community", "Professional", "Enterprise"):
+        for year in ("2022", "2019"):
+            tools = vs_base / year / edition / "VC" / "Tools" / "MSVC"
+            if tools.exists():
+                versions = sorted(tools.iterdir(), reverse=True)
+                if versions:
+                    msvc_root = versions[0]
+                    msvc_bin = msvc_root / "bin" / "Hostx64" / "x64"
+                    break
+        if msvc_bin:
+            break
+
+    # Find Windows SDK
+    sdk_base = Path(r"C:\Program Files (x86)\Windows Kits\10")
+    sdk_ver = None
+    if (sdk_base / "Include").exists():
+        versions = sorted((sdk_base / "Include").iterdir(), reverse=True)
+        if versions:
+            sdk_ver = versions[0].name
+
+    # Find CUDA
+    cuda_base = Path(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA")
+    cuda_home = None
+    if cuda_base.exists():
+        versions = sorted(cuda_base.iterdir(), reverse=True)
+        if versions:
+            cuda_home = versions[0]
+
+    # Set PATH
+    extra_paths = []
+    if msvc_bin and msvc_bin.exists():
+        extra_paths.append(str(msvc_bin))
+    if cuda_home:
+        extra_paths.append(str(cuda_home / "bin"))
+    if extra_paths:
+        env["PATH"] = ";".join(extra_paths) + ";" + env.get("PATH", "")
+
+    # Set INCLUDE and LIB for MSVC
+    if msvc_root and sdk_ver:
+        env["INCLUDE"] = ";".join([
+            str(msvc_root / "include"),
+            str(sdk_base / "Include" / sdk_ver / "ucrt"),
+            str(sdk_base / "Include" / sdk_ver / "shared"),
+            str(sdk_base / "Include" / sdk_ver / "um"),
+        ])
+        env["LIB"] = ";".join([
+            str(msvc_root / "lib" / "x64"),
+            str(sdk_base / "Lib" / sdk_ver / "ucrt" / "x64"),
+            str(sdk_base / "Lib" / sdk_ver / "um" / "x64"),
+        ])
+
+    if cuda_home:
+        env["CUDA_HOME"] = str(cuda_home)
+
+    # Target only the installed GPU arch to speed up compilation
+    env.setdefault("TORCH_CUDA_ARCH_LIST", "8.9")
+
+    return env
+
+
 class TaskRunner:
     def __init__(self):
         self._processes: dict[str, asyncio.subprocess.Process] = {}
+        self._gpu_semaphore: asyncio.Semaphore | None = None
+
+    def _get_gpu_semaphore(self) -> asyncio.Semaphore:
+        """Lazy-init semaphore (must be created inside an event loop)."""
+        if self._gpu_semaphore is None:
+            self._gpu_semaphore = asyncio.Semaphore(settings.max_concurrent_gpu_tasks)
+        return self._gpu_semaphore
 
     def is_running(self, project_id: str) -> bool:
         proc = self._processes.get(project_id)
@@ -27,12 +107,26 @@ class TaskRunner:
         substep: str = "",
         line_parser: Optional[Callable[[str], Optional[dict]]] = None,
         timeout: float = DEFAULT_TIMEOUT,
+        requires_gpu: bool = False,
     ) -> int:
         if self.is_running(project_id):
             raise RuntimeError(f"Project {project_id} already has a running task")
 
+        # Acquire GPU semaphore if needed (prevents OOM from concurrent training)
+        gpu_acquired = False
+        if requires_gpu:
+            sem = self._get_gpu_semaphore()
+            if sem.locked():
+                await manager.send_status(project_id, step, "queued")
+                await manager.send_log(project_id, "[INFO] Waiting for GPU (another task is running)...")
+            await sem.acquire()
+            gpu_acquired = True
+
         await manager.send_log(project_id, f"$ {' '.join(cmd)}")
         await manager.send_status(project_id, step, "running")
+
+        # Build env with MSVC + CUDA paths for GPU tasks that need JIT compilation
+        proc_env = _build_gpu_env() if requires_gpu else None
 
         # On Windows, .bat/.cmd files must go through shell
         is_bat = sys.platform == "win32" and cmd[0].lower().endswith((".bat", ".cmd"))
@@ -45,6 +139,7 @@ class TaskRunner:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=str(cwd) if cwd else None,
+                env=proc_env,
             )
         else:
             proc = await asyncio.create_subprocess_exec(
@@ -52,6 +147,7 @@ class TaskRunner:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=str(cwd) if cwd else None,
+                env=proc_env,
             )
         self._processes[project_id] = proc
 
@@ -124,6 +220,8 @@ class TaskRunner:
             return rc
         finally:
             self._processes.pop(project_id, None)
+            if gpu_acquired:
+                self._get_gpu_semaphore().release()
 
     async def cancel(self, project_id: str) -> bool:
         proc = self._processes.get(project_id)

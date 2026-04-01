@@ -8,9 +8,9 @@
  * renderer can be added here when visionary-lab supports WebXR.
  */
 
-import { MkkelloggRenderer, SplatRenderer } from "./mkkellogg";
+import { MkkelloggRenderer, SplatRenderer, RendererStats } from "./mkkellogg";
 
-export type { SplatRenderer };
+export type { SplatRenderer, RendererStats };
 
 export async function createRenderer(
   url: string,

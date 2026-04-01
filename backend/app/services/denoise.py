@@ -11,6 +11,7 @@ Strength levels:
 
 import logging
 import struct
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Tuple
 
@@ -52,25 +53,41 @@ def _write_points3d_bin(path: Path, xyz: np.ndarray, rgb: np.ndarray):
             f.write(struct.pack("<Q", 0))              # empty track
 
 
+@dataclass
+class DenoiseResult:
+    success: bool
+    output_path: Path
+    points_before: int = 0
+    points_after: int = 0
+    skipped_reason: str | None = None
+
+
 def denoise_point_cloud(
     points3d_path: Path,
     output_path: Path,
     strength: str = "medium",
-) -> Path:
+) -> DenoiseResult:
     """
     Apply statistical outlier removal to a COLMAP points3D.bin file.
-    Returns the output path (which equals points3d_path when strength="off").
+
+    Returns a DenoiseResult indicating success/failure and why it was skipped.
     """
     std_ratio = _STD_RATIO.get(strength)
     if std_ratio is None:
         log.info("Denoising: strength=off, skipping")
-        return points3d_path
+        return DenoiseResult(
+            success=True, output_path=points3d_path,
+            skipped_reason="strength_off",
+        )
 
     try:
         import open3d as o3d
     except ImportError:
         log.warning("open3d not installed; skipping point cloud denoising")
-        return points3d_path
+        return DenoiseResult(
+            success=False, output_path=points3d_path,
+            skipped_reason="open3d_not_installed",
+        )
 
     xyz, rgb = _read_points3d_bin(points3d_path)
     n_before = len(xyz)
@@ -94,4 +111,7 @@ def denoise_point_cloud(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     _write_points3d_bin(output_path, clean_xyz, clean_rgb)
-    return output_path
+    return DenoiseResult(
+        success=True, output_path=output_path,
+        points_before=n_before, points_after=n_after,
+    )

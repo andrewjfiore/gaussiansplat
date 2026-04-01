@@ -28,6 +28,12 @@ class ProjectSummary(BaseModel):
     thumbnail: Optional[str] = None
 
 
+class VideoInfo(BaseModel):
+    index: int
+    filename: str
+    video_type: str = "standard"
+
+
 class ProjectDetail(ProjectSummary):
     video_filename: Optional[str] = None
     video_type: str = "standard"  # "standard" | "equirectangular"
@@ -35,6 +41,9 @@ class ProjectDetail(ProjectSummary):
     sfm_points: int = 0
     training_iterations: int = 0
     has_output: bool = False
+    temporal_mode: str = "static"  # "static" | "4d"
+    videos: list[VideoInfo] = []
+    video_count: int = 1
 
 
 class SampleVideo(BaseModel):
@@ -47,12 +56,16 @@ class SampleVideo(BaseModel):
 
 class ExtractSettings(BaseModel):
     fps: float = 2.0
+    start_time: Optional[float] = None  # seconds offset into video
+    filter_blur: bool = True
+    min_blur_score: float = 50.0
 
 
 class SfmSettings(BaseModel):
     matcher_type: str = "sequential_matcher"
     single_camera: bool = True
     quality: str = "high"
+    enable_dense: bool = False
 
 
 class TrainSettings(BaseModel):
@@ -60,6 +73,23 @@ class TrainSettings(BaseModel):
     use_scaffold: bool = True
     voxel_size: float = 0.001
     denoise_strength: str = "off"  # off | light | medium | aggressive
+    sh_degree: int = 0  # 0-3, higher = view-dependent color
+    enable_depth: bool = False
+    depth_weight: float = 0.1
+    temporal_mode: str = "static"  # "static" | "4d"
+    temporal_smoothness: float = 0.01
+    resume: bool = False
+
+
+class RefineSettings(BaseModel):
+    refine_steps: int = 3000  # additional training iterations for refinement
+    alpha_low: float = 0.5   # visibility transfer: low-confidence threshold
+    alpha_high: float = 0.8  # visibility transfer: high-confidence threshold
+    diffusion_inpaint: bool = False  # run SD inpainting for truly unseen regions
+    num_novel_views: int = 8
+    novel_view_weight: float = 0.3
+    diffusion_steps: int = 20
+    diffusion_guidance: float = 3.0
 
 
 class SystemDepStatus(BaseModel):

@@ -17,6 +17,7 @@ import {
 
 interface Props {
   plyUrl: string;
+  ksplatUrl?: string;
   onScreenshot?: (dataUrl: string) => void;
 }
 
@@ -72,7 +73,7 @@ function IconButton({
 
 /* ---------- main component ---------- */
 
-export function SplatViewer({ plyUrl, onScreenshot }: Props) {
+export function SplatViewer({ plyUrl, ksplatUrl, onScreenshot }: Props) {
   /* refs */
   const outerRef = useRef<HTMLDivElement>(null); // fullscreen target
   const containerRef = useRef<HTMLDivElement>(null); // viewer root
@@ -106,10 +107,11 @@ export function SplatViewer({ plyUrl, onScreenshot }: Props) {
 
         const viewer = new GaussianSplats3D.Viewer({
           cameraUp: [0, -1, 0],
-          initialCameraPosition: [...INITIAL_CAMERA_POSITION],
-          initialCameraLookAt: [...INITIAL_CAMERA_LOOK_AT],
           rootElement: containerRef.current,
           sharedMemoryForWorkers: false,
+          dynamicScene: false,
+          antialiased: false,
+          devicePixelRatio: 1,
         });
 
         viewerRef.current = viewer;
@@ -125,7 +127,8 @@ export function SplatViewer({ plyUrl, onScreenshot }: Props) {
           /* non-critical */
         }
 
-        await viewer.addSplatScene(plyUrl, {
+        const loadUrl = ksplatUrl || plyUrl;
+        await viewer.addSplatScene(loadUrl, {
           showLoadingUI: true,
           progressiveLoad: true,
         });
@@ -155,7 +158,7 @@ export function SplatViewer({ plyUrl, onScreenshot }: Props) {
         viewerRef.current = null;
       }
     };
-  }, [plyUrl]);
+  }, [plyUrl, ksplatUrl]);
 
   /* ---------- background color sync ---------- */
   useEffect(() => {

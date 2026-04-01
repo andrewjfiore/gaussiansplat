@@ -51,6 +51,24 @@ def build_undistorter_cmd(image_path: Path, input_path: Path, output_path: Path)
     ]
 
 
+def build_patch_match_stereo_cmd(workspace_path: Path) -> list[str]:
+    """Dense stereo matching on undistorted images."""
+    return [
+        _colmap(), "patch_match_stereo",
+        "--workspace_path", str(workspace_path),
+    ]
+
+
+def build_stereo_fusion_cmd(workspace_path: Path, output_ply: Path) -> list[str]:
+    """Fuse stereo depth maps into a dense point cloud."""
+    output_ply.parent.mkdir(parents=True, exist_ok=True)
+    return [
+        _colmap(), "stereo_fusion",
+        "--workspace_path", str(workspace_path),
+        "--output_path", str(output_ply),
+    ]
+
+
 def parse_colmap_line(line: str) -> Optional[dict]:
     # Match progress indicators from COLMAP output
     if "Registering image" in line:

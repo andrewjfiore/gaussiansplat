@@ -9,13 +9,14 @@ from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse
 
 from ..config import settings
-from ..database import get_db
+from ..database import db_session
 from ..models import (
     ProjectCreate, ProjectSummary, ProjectDetail, PipelineStep,
-    SAMPLE_VIDEOS,
+    SAMPLE_VIDEOS, VideoInfo,
 )
 from ..services.equirect import is_equirectangular
 from ..services.compress import ensure_ksplat
+from ..services.spz_export import ply_to_spz
 
 logger = logging.getLogger(__name__)
 
@@ -51,8 +52,7 @@ def _detect_video_type(video_path: Path) -> str:
 
 @router.get("", response_model=list[ProjectSummary])
 async def list_projects():
-    db = await get_db()
-    try:
+    async with db_session() as db:
         cursor = await db.execute("SELECT * FROM projects ORDER BY created_at DESC")
         rows = await cursor.fetchall()
         results = []
@@ -68,8 +68,6 @@ async def list_projects():
                 created_at=row["created_at"], error=row["error"], thumbnail=thumb,
             ))
         return results
-    finally:
-        await db.close()
 
 
 @router.post("", response_model=ProjectSummary)
@@ -84,15 +82,11 @@ async def create_project(body: ProjectCreate):
     (proj_dir / "colmap").mkdir(exist_ok=True)
     (proj_dir / "output").mkdir(exist_ok=True)
 
-    db = await get_db()
-    try:
+    async with db_session() as db:
         await db.execute(
             "INSERT INTO projects (id, name, step, created_at) VALUES (?, ?, ?, ?)",
             (project_id, body.name, PipelineStep.CREATED.value, now),
         )
-        await db.commit()
-    finally:
-        await db.close()
 
     logger.info("Project created: id=%s name=%s", project_id, body.name)
     return ProjectSummary(id=project_id, name=body.name, step=PipelineStep.CREATED, created_at=now)
@@ -100,8 +94,7 @@ async def create_project(body: ProjectCreate):
 
 @router.get("/{project_id}", response_model=ProjectDetail)
 async def get_project(project_id: str):
-    db = await get_db()
-    try:
+    async with db_session() as db:
         cursor = await db.execute("SELECT * FROM projects WHERE id = ?", (project_id,))
         row = await cursor.fetchone()
         if not row:
@@ -118,6 +111,22 @@ async def get_project(project_id: str):
             imgs = sorted(frames_dir.glob("*.jpg"))
             thumb = f"/api/projects/{project_id}/frames/{imgs[0].name}"
 
+        # Load video list from project_videos table
+        vcursor = await db.execute(
+            "SELECT video_index, filename, video_type FROM project_videos "
+            "WHERE project_id = ? ORDER BY video_index", (project_id,)
+        )
+        vrows = await vcursor.fetchall()
+        if vrows:
+            videos = [VideoInfo(index=v["video_index"], filename=v["filename"],
+                                video_type=v["video_type"] or "standard") for v in vrows]
+        elif row["video_filename"]:
+            # Legacy single-video project — synthesize a one-element list
+            videos = [VideoInfo(index=0, filename=row["video_filename"],
+                                video_type=row["video_type"] or "standard")]
+        else:
+            videos = []
+
         return ProjectDetail(
             id=row["id"], name=row["name"], step=row["step"],
             created_at=row["created_at"], error=row["error"],
@@ -128,20 +137,17 @@ async def get_project(project_id: str):
             training_iterations=row["training_iterations"],
             has_output=has_output,
             thumbnail=thumb,
+            temporal_mode=row["temporal_mode"] or "static",
+            videos=videos,
+            video_count=max(len(videos), 1),
         )
-    finally:
-        await db.close()
 
 
 @router.delete("/{project_id}")
 async def delete_project(project_id: str):
     import shutil
-    db = await get_db()
-    try:
+    async with db_session() as db:
         await db.execute("DELETE FROM projects WHERE id = ?", (project_id,))
-        await db.commit()
-    finally:
-        await db.close()
 
     proj_dir = _project_dir(project_id)
     if proj_dir.exists():
@@ -168,20 +174,51 @@ async def upload_video(project_id: str, file: UploadFile = File(...)):
 
     video_type = _detect_video_type(dest)
 
-    db = await get_db()
-    try:
+    now = datetime.now(timezone.utc).isoformat()
+    async with db_session() as db:
+        # Keep legacy video_filename updated (always points to latest upload)
         await db.execute(
             "UPDATE projects SET video_filename = ?, video_type = ? WHERE id = ?",
             (filename, video_type, project_id),
         )
-        await db.commit()
-    finally:
-        await db.close()
+        # Add to project_videos table (additive — supports multiple uploads)
+        cursor = await db.execute(
+            "SELECT COALESCE(MAX(video_index), -1) FROM project_videos WHERE project_id = ?",
+            (project_id,),
+        )
+        max_idx = (await cursor.fetchone())[0]
+        await db.execute(
+            "INSERT INTO project_videos (project_id, video_index, filename, video_type, uploaded_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (project_id, max_idx + 1, filename, video_type, now),
+        )
 
     file_size = dest.stat().st_size
-    logger.info("Video uploaded: project=%s file=%s size=%d bytes type=%s",
-                project_id, filename, file_size, video_type)
-    return {"filename": filename, "size": file_size, "video_type": video_type}
+    logger.info("Video uploaded: project=%s file=%s size=%d bytes type=%s video_index=%d",
+                project_id, filename, file_size, video_type, max_idx + 1)
+    return {"filename": filename, "size": file_size, "video_type": video_type,
+            "video_index": max_idx + 1}
+
+
+@router.get("/{project_id}/videos")
+async def list_videos(project_id: str):
+    """List all uploaded videos for a project."""
+    async with db_session() as db:
+        cursor = await db.execute(
+            "SELECT video_index, filename, video_type FROM project_videos "
+            "WHERE project_id = ? ORDER BY video_index", (project_id,)
+        )
+        rows = await cursor.fetchall()
+        if rows:
+            return [{"index": r["video_index"], "filename": r["filename"],
+                     "video_type": r["video_type"]} for r in rows]
+        # Fallback: legacy project with just video_filename
+        cursor = await db.execute("SELECT video_filename, video_type FROM projects WHERE id = ?", (project_id,))
+        row = await cursor.fetchone()
+        if row and row["video_filename"]:
+            return [{"index": 0, "filename": row["video_filename"],
+                     "video_type": row["video_type"] or "standard"}]
+        return []
 
 
 @router.post("/{project_id}/sample")
@@ -205,15 +242,11 @@ async def download_sample(project_id: str, sample_id: str = Form(...)):
                 async for chunk in resp.aiter_bytes(chunk_size=256 * 1024):
                     f.write(chunk)
 
-    db = await get_db()
-    try:
+    async with db_session() as db:
         await db.execute(
             "UPDATE projects SET video_filename = ? WHERE id = ?",
             (filename, project_id),
         )
-        await db.commit()
-    finally:
-        await db.close()
 
     return {"filename": filename, "size": dest.stat().st_size}
 
@@ -265,6 +298,44 @@ async def get_ply(project_id: str):
     )
 
 
+@router.get("/{project_id}/sparse-ply")
+async def get_sparse_ply(project_id: str):
+    """Serve the SfM sparse point cloud preview PLY."""
+    ply_path = _project_dir(project_id) / "colmap" / "sparse_preview.ply"
+    if not ply_path.exists():
+        raise HTTPException(404, "Sparse preview not available — run SfM first")
+    return FileResponse(
+        path=str(ply_path),
+        filename=f"{project_id}_sparse.ply",
+        media_type="application/x-ply",
+    )
+
+
+@router.get("/{project_id}/spz")
+async def get_spz(project_id: str):
+    """Serve SPZ compressed gaussian splat (10-20x smaller than PLY)."""
+    output_dir = _project_dir(project_id) / "output"
+    ply_path = output_dir / "point_cloud.ply"
+    spz_path = output_dir / "point_cloud.spz"
+
+    if not ply_path.exists():
+        raise HTTPException(404, "PLY not found — complete training first")
+
+    # Compress on demand
+    if not spz_path.exists():
+        try:
+            ply_to_spz(ply_path, spz_path)
+        except Exception as e:
+            logger.warning("SPZ export failed: %s", e)
+            raise HTTPException(500, f"SPZ export failed: {e}")
+
+    return FileResponse(
+        path=str(spz_path),
+        filename=f"{project_id}.spz",
+        media_type="application/octet-stream",
+    )
+
+
 @router.get("/{project_id}/splat")
 async def get_splat(project_id: str):
     """
@@ -295,3 +366,40 @@ async def get_mesh(project_id: str):
         filename=f"{project_id}.glb",
         media_type="model/gltf-binary",
     )
+
+
+@router.get("/{project_id}/temporal-info")
+async def get_temporal_info(project_id: str):
+    """Return temporal frame info for 4D splats."""
+    output_dir = _project_dir(project_id) / "output" / "temporal_frames"
+    if not output_dir.exists():
+        return {"available": False, "frame_count": 0}
+    frames = sorted(output_dir.glob("frame_*.ply"))
+    return {
+        "available": len(frames) > 0,
+        "frame_count": len(frames),
+    }
+
+
+@router.get("/{project_id}/checkpoints")
+async def list_checkpoints(project_id: str):
+    """List available training checkpoints for comparison."""
+    output_dir = _project_dir(project_id) / "output"
+    if not output_dir.exists():
+        return []
+    checkpoints = []
+    ckpt = output_dir / "checkpoint.pt"
+    if ckpt.exists():
+        checkpoints.append({
+            "name": "checkpoint.pt",
+            "size": ckpt.stat().st_size,
+            "path": f"/api/projects/{project_id}/output/checkpoint.pt",
+        })
+    ply = output_dir / "point_cloud.ply"
+    if ply.exists():
+        checkpoints.append({
+            "name": "point_cloud.ply",
+            "size": ply.stat().st_size,
+            "path": f"/api/projects/{project_id}/ply",
+        })
+    return checkpoints
