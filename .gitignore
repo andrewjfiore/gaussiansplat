@@ -16,3 +16,7 @@ tests/logs/*.log
 fullquality_run/
 test_run/
 video/
+
+# Logs and large files
+*.log
+*.mp4
