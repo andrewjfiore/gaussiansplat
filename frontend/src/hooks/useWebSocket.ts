@@ -32,6 +32,7 @@ export function useWebSocket(projectId: string | null) {
 
     function connect() {
       if (disposed) return;
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return;
 
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
       // Connect directly to backend — Next.js rewrites don't proxy WebSockets
@@ -41,6 +42,10 @@ export function useWebSocket(projectId: string | null) {
       const url = `${protocol}//${backendHost}/ws/projects/${projectId}/logs`;
       const ws = new WebSocket(url);
       wsRef.current = ws;
+
+      ws.onopen = () => {
+        clearTimeout(reconnectTimer.current);
+      };
 
       ws.onmessage = (evt) => {
         try {
@@ -71,9 +76,16 @@ export function useWebSocket(projectId: string | null) {
       };
 
       ws.onclose = () => {
+        if (wsRef.current === ws) {
+          wsRef.current = null;
+        }
         if (!disposed) {
           reconnectTimer.current = setTimeout(connect, 2000);
         }
+      };
+
+      ws.onerror = () => {
+        ws.close();
       };
     }
 
