@@ -59,6 +59,10 @@ class ExtractSettings(BaseModel):
     start_time: Optional[float] = None  # seconds offset into video
     filter_blur: bool = True
     min_blur_score: float = 50.0
+    # Sharp-frame mode: extract denser candidates then keep sharpest frame per bucket.
+    # window=5 means 11 candidates per target frame (~±5 neighboring samples).
+    sharp_frame_selection: bool = False
+    sharp_window: int = 5
 
 
 class SfmSettings(BaseModel):

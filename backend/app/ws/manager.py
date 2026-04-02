@@ -16,6 +16,8 @@ class ConnectionManager:
         conns = self._connections.get(project_id, [])
         if ws in conns:
             conns.remove(ws)
+        if not conns and project_id in self._connections:
+            del self._connections[project_id]
 
     async def broadcast(self, project_id: str, data: dict[str, Any]):
         msg = json.dumps(data)

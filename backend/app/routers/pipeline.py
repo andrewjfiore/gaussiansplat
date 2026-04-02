@@ -13,7 +13,7 @@ from ..services import colmap as colmap_svc
 from ..services import trainer as trainer_svc
 from ..services.denoise import denoise_point_cloud
 from ..services.disk import check_disk_space, SPACE_REQUIREMENTS_MB
-from ..services.frame_quality import filter_frames
+from ..services.frame_quality import filter_frames, select_sharpest_per_bucket
 from ..services.sfm_quality import evaluate_sfm_quality, export_sparse_ply
 from ..ws.manager import manager
 
@@ -125,6 +125,13 @@ async def extract_frames(project_id: str, body: ExtractSettings | None = None):
     multi_video = len(video_rows) > 1
     video_sources = []
 
+    # Sharp-frame mode: sample more densely, then keep the sharpest frame
+    # in each neighborhood bucket.
+    sharp_mode = bool(getattr(body, "sharp_frame_selection", False))
+    sharp_window = max(0, int(getattr(body, "sharp_window", 5)))
+    bucket_size = (2 * sharp_window) + 1
+    sample_fps = body.fps * bucket_size if sharp_mode else body.fps
+
     # Build extraction commands — one per video
     cmds = []
     for vr in video_rows:
@@ -133,7 +140,7 @@ async def extract_frames(project_id: str, body: ExtractSettings | None = None):
         prefix = f"v{vid_idx}_" if multi_video else ""
         video_path = proj / "input" / vid_file
         cmds.append((prefix, ffmpeg_svc.build_extract_cmd(
-            video_path, frames_dir, fps=body.fps,
+            video_path, frames_dir, fps=sample_fps,
             start_time=body.start_time, video_prefix=prefix,
         )))
         video_sources.append({
@@ -160,6 +167,18 @@ async def extract_frames(project_id: str, body: ExtractSettings | None = None):
                     await _update_step(project_id, PipelineStep.FAILED,
                                        f"ffmpeg exited with code {rc} on video {i + 1}")
                     return
+
+            # Sharp-frame down-selection (optional)
+            if sharp_mode:
+                try:
+                    sharp_res = select_sharpest_per_bucket(frames_dir, bucket_size=bucket_size)
+                    await manager.send_log(
+                        project_id,
+                        f"[INFO] Sharp-frame selection: kept {sharp_res.selected_frames}/"
+                        f"{sharp_res.total_frames} (window=±{sharp_window}, bucket={bucket_size})",
+                    )
+                except Exception as e:
+                    await manager.send_log(project_id, f"[WARN] Sharp-frame selection skipped: {e}")
 
             # Apply blur filtering
             filter_blur = getattr(body, "filter_blur", True)
@@ -518,6 +537,8 @@ async def extract_mesh(project_id: str):
     """
     import sys
     await _check_precondition(project_id, "extract-mesh")
+    if task_runner.is_running(project_id + "_mesh"):
+        raise HTTPException(409, "Mesh extraction is already running for this project")
     proj = _project_dir(project_id)
 
     ply_path = proj / "output" / "point_cloud.ply"
