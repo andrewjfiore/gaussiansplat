@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException
 
 from ..config import settings
 from ..database import db_session
-from ..models import PipelineStep, ExtractSettings, SfmSettings, TrainSettings, RefineSettings
+from ..models import PipelineStep, ExtractSettings, SfmSettings, TrainSettings, RefineSettings, MaskSettings, NovelViewSettings
 from ..pipeline.task_runner import task_runner
 from ..services import ffmpeg as ffmpeg_svc
 from ..services import colmap as colmap_svc
@@ -14,6 +14,7 @@ from ..services import trainer as trainer_svc
 from ..services.denoise import denoise_point_cloud
 from ..services.disk import check_disk_space, SPACE_REQUIREMENTS_MB
 from ..services.frame_quality import filter_frames, select_sharpest_per_bucket
+from ..services import masking as mask_svc
 from ..services.sfm_quality import evaluate_sfm_quality, export_sparse_ply
 from ..ws.manager import manager
 
@@ -31,12 +32,18 @@ def _project_dir(pid: str) -> Path:
 _STEP_PREREQUISITES: dict[str, set[PipelineStep]] = {
     "extract-frames": {
         PipelineStep.CREATED, PipelineStep.FRAMES_READY,
+        PipelineStep.MASKS_READY, PipelineStep.SFM_READY,
+        PipelineStep.TRAINING_COMPLETE, PipelineStep.FAILED,
+    },
+    "mask": {
+        PipelineStep.FRAMES_READY, PipelineStep.MASKS_READY,
         PipelineStep.SFM_READY, PipelineStep.TRAINING_COMPLETE,
         PipelineStep.FAILED,
     },
     "sfm": {
-        PipelineStep.FRAMES_READY, PipelineStep.SFM_READY,
-        PipelineStep.TRAINING_COMPLETE, PipelineStep.FAILED,
+        PipelineStep.FRAMES_READY, PipelineStep.MASKS_READY,
+        PipelineStep.SFM_READY, PipelineStep.TRAINING_COMPLETE,
+        PipelineStep.FAILED,
     },
     "train": {
         PipelineStep.SFM_READY, PipelineStep.TRAINING_COMPLETE,
@@ -221,6 +228,123 @@ async def extract_frames(project_id: str, body: ExtractSettings | None = None):
     return {"status": "started"}
 
 
+@router.post("/mask")
+async def run_masking(project_id: str, body: MaskSettings | None = None):
+    body = body or MaskSettings()
+    await _check_precondition(project_id, "mask")
+
+    proj = _project_dir(project_id)
+    frames_dir = proj / "frames"
+    masks_dir = proj / "masks"
+
+    if not frames_dir.exists() or not any(frames_dir.glob("*.jpg")):
+        raise HTTPException(400, "No extracted frames — run frame extraction first")
+
+    # Choose masking backend
+    if body.use_external:
+        exe = mask_svc.find_automasker_exe()
+        if not exe:
+            raise HTTPException(
+                400,
+                "AutoMasker executable not found. Place it in tools/automasker/ "
+                "or disable 'use external' to use built-in masking."
+            )
+        cmd = mask_svc.build_external_mask_cmd(
+            frames_dir, masks_dir, body.keywords,
+            mode=body.mode, invert=body.invert,
+            precision=body.precision, expand=body.expand, feather=body.feather,
+        )
+    else:
+        cmd = mask_svc.build_builtin_mask_cmd(
+            frames_dir, masks_dir, body.keywords,
+            mode=body.mode, invert=body.invert,
+            precision=body.precision, expand=body.expand, feather=body.feather,
+        )
+
+    async def run():
+        try:
+            await _update_step(project_id, PipelineStep.MASKING)
+            await manager.send_log(
+                project_id,
+                f"[INFO] Masking with keywords: {body.keywords} "
+                f"(mode={body.mode}, precision={body.precision})",
+            )
+            rc = await task_runner.run(
+                project_id, cmd, step="mask", substep="generating",
+                line_parser=mask_svc.parse_mask_line,
+                timeout=3600,
+                requires_gpu=True,
+            )
+            if rc == 0:
+                mask_count = sum(1 for _ in masks_dir.glob("*.png")) if masks_dir.exists() else 0
+                async with db_session() as db2:
+                    await db2.execute(
+                        "UPDATE projects SET step = ?, mask_keywords = ?, mask_count = ? "
+                        "WHERE id = ?",
+                        (PipelineStep.MASKS_READY.value, body.keywords, mask_count, project_id),
+                    )
+                await manager.send_log(
+                    project_id, f"[INFO] Masking complete: {mask_count} masks generated"
+                )
+            else:
+                await _update_step(project_id, PipelineStep.FAILED, f"Masking failed (exit code {rc})")
+        except Exception as e:
+            logger.exception(f"Masking failed for {project_id}")
+            await _update_step(project_id, PipelineStep.FAILED, str(e))
+
+    asyncio.create_task(run())
+    return {"status": "started"}
+
+
+@router.post("/generate-novel-views")
+async def generate_novel_views(project_id: str, body: NovelViewSettings | None = None):
+    """Generate AI novel views from reference frames using selected model."""
+    body = body or NovelViewSettings()
+    proj = _project_dir(project_id)
+    frames_dir = proj / "frames"
+    novel_dir = proj / "novel_views"
+
+    if not frames_dir.exists() or not any(frames_dir.glob("*.jpg")):
+        raise HTTPException(400, "No frames — extract frames first")
+
+    cmd = trainer_svc.build_novel_view_cmd(
+        input_dir=frames_dir,
+        output_dir=novel_dir,
+        model=body.model,
+        num_refs=body.num_refs,
+        output_size=body.output_size,
+    )
+
+    async def run():
+        try:
+            await manager.send_log(
+                project_id,
+                f"[INFO] Generating novel views with {body.model} "
+                f"({body.num_refs} references, {body.output_size}px)",
+            )
+            rc = await task_runner.run(
+                project_id, cmd, step="novel_views", substep="generating",
+                line_parser=trainer_svc.parse_novel_view_line,
+                timeout=600,
+                requires_gpu=True,
+            )
+            if rc == 0:
+                n_views = sum(1 for _ in novel_dir.glob("novel_*.jpg")) if novel_dir.exists() else 0
+                await manager.send_log(
+                    project_id, f"[INFO] Generated {n_views} novel views with {body.model}"
+                )
+            else:
+                await manager.send_log(
+                    project_id, f"[WARN] Novel view generation failed (exit code {rc})"
+                )
+        except Exception as e:
+            logger.exception(f"Novel view generation failed for {project_id}")
+            await manager.send_log(project_id, f"[ERROR] {e}")
+
+    asyncio.create_task(run())
+    return {"status": "started", "model": body.model}
+
+
 @router.post("/sfm")
 async def run_sfm(project_id: str, body: SfmSettings | None = None):
     body = body or SfmSettings()
@@ -260,7 +384,14 @@ async def run_sfm(project_id: str, body: SfmSettings | None = None):
                 )
 
             # Step 1: Feature extraction
-            cmd = colmap_svc.build_feature_extractor_cmd(db_path, frames_dir, body.single_camera)
+            # Pass mask path if masks exist — COLMAP ignores masked pixels in feature extraction
+            masks_dir = proj / "masks"
+            mask_path = masks_dir if masks_dir.exists() and any(masks_dir.glob("*.png")) else None
+            if mask_path:
+                await manager.send_log(project_id, "[INFO] Using masks for feature extraction")
+            cmd = colmap_svc.build_feature_extractor_cmd(
+                db_path, frames_dir, body.single_camera, mask_path=mask_path
+            )
             rc = await task_runner.run(
                 project_id, cmd, step="sfm", substep="feature_extraction",
                 line_parser=colmap_svc.parse_colmap_line,
@@ -507,6 +638,7 @@ async def pipeline_health(project_id: str):
     # Stale = DB says an active step but no subprocess is alive
     active_steps = {
         PipelineStep.EXTRACTING_FRAMES.value,
+        PipelineStep.MASKING.value,
         PipelineStep.RUNNING_SFM.value,
         PipelineStep.TRAINING.value,
     }
@@ -523,9 +655,26 @@ async def pipeline_health(project_id: str):
 
 @router.post("/cancel")
 async def cancel_pipeline(project_id: str):
+    # Check if this is a training step — graceful stop exports PLY
+    async with db_session() as db_c:
+        cursor = await db_c.execute("SELECT step FROM projects WHERE id = ?", (project_id,))
+        row = await cursor.fetchone()
+    is_training = row and row["step"] in (PipelineStep.TRAINING.value,)
+
     cancelled = await task_runner.cancel(project_id)
     if cancelled:
-        await _update_step(project_id, PipelineStep.FAILED, "Cancelled by user")
+        if is_training:
+            # Check if a PLY was exported during graceful shutdown
+            ply_path = _project_dir(project_id) / "output" / "point_cloud.ply"
+            if ply_path.exists():
+                await _update_step(project_id, PipelineStep.TRAINING_COMPLETE)
+                await manager.send_log(
+                    project_id, "[INFO] Training stopped early — PLY exported successfully"
+                )
+            else:
+                await _update_step(project_id, PipelineStep.FAILED, "Cancelled by user (no PLY exported)")
+        else:
+            await _update_step(project_id, PipelineStep.FAILED, "Cancelled by user")
     return {"cancelled": cancelled}
 
 

@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     db_path: Path = _ROOT / "data" / "gaussiansplat.db"
     log_dir: Path = _ROOT / "data" / "logs"
     max_concurrent_gpu_tasks: int = 1
+    automasker_exe: str = ""  # path to external AutoMasker.exe (optional)
 
     @property
     def log_file(self) -> Path:

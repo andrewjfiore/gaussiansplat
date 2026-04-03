@@ -20,9 +20,21 @@ Usage:
 
 import argparse
 import math
+import signal
 import sys
 import time
 from pathlib import Path
+
+# Graceful early-stop: catch SIGTERM/SIGINT to break training loop and still export PLY
+_stop_requested = False
+
+def _handle_stop(signum, frame):
+    global _stop_requested
+    _stop_requested = True
+    print(f"\n[INFO] Stop requested (signal {signum}) — finishing current step and exporting PLY...", flush=True)
+
+signal.signal(signal.SIGTERM, _handle_stop)
+signal.signal(signal.SIGINT, _handle_stop)
 
 import numpy as np
 import torch
@@ -189,8 +201,15 @@ def train(data_dir: Path, result_dir: Path, max_steps: int, voxel_size: float,
     # ── Training loop ─────────────────────────────────────────────────────
     t0 = time.time()
     for step in range(start_step, max_steps + 1):
+        if _stop_requested:
+            print(f"[INFO] Early stop at step {step - 1}/{max_steps}", flush=True)
+            break
         cam = cam_list[(step - 1) % len(cam_list)]
-        img = np.array(Image.open(cam["path"]).convert("RGB"), dtype=np.float32) / 255.0
+        pil_img = Image.open(cam["path"]).convert("RGB")
+        # Resize to COLMAP camera dimensions if needed (dataset images may be at different resolution)
+        if pil_img.size != (cam["W"], cam["H"]):
+            pil_img = pil_img.resize((cam["W"], cam["H"]), Image.LANCZOS)
+        img = np.array(pil_img, dtype=np.float32) / 255.0
         gt = torch.tensor(img, device=DEVICE).permute(2, 0, 1).unsqueeze(0)
 
         w2c_t = torch.tensor(cam["w2c"], dtype=torch.float32, device=DEVICE).unsqueeze(0)

@@ -34,6 +34,8 @@ _DB_MIGRATIONS = [
     "ALTER TABLE projects ADD COLUMN sfm_registered_images INTEGER DEFAULT 0",
     "ALTER TABLE projects ADD COLUMN sfm_reprojection_error REAL DEFAULT 0.0",
     "ALTER TABLE projects ADD COLUMN temporal_mode TEXT DEFAULT 'static'",
+    "ALTER TABLE projects ADD COLUMN mask_keywords TEXT",
+    "ALTER TABLE projects ADD COLUMN mask_count INTEGER DEFAULT 0",
 ]
 
 

@@ -20,3 +20,7 @@ video/
 # Logs and large files
 *.log
 *.mp4
+
+# Model weights
+backend/models/*.pth
+backend/models/*.pt

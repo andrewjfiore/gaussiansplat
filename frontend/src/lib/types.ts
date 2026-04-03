@@ -2,6 +2,8 @@ export type PipelineStep =
   | "created"
   | "extracting_frames"
   | "frames_ready"
+  | "masking"
+  | "masks_ready"
   | "running_sfm"
   | "sfm_ready"
   | "training"
@@ -33,6 +35,8 @@ export interface ProjectDetail extends ProjectSummary {
   temporal_mode?: "static" | "4d";
   videos?: VideoInfo[];
   video_count?: number;
+  mask_keywords?: string | null;
+  mask_count?: number;
 }
 
 export interface TrainSettings {
@@ -97,6 +101,8 @@ export const STEP_ORDER: PipelineStep[] = [
   "created",
   "extracting_frames",
   "frames_ready",
+  "masking",
+  "masks_ready",
   "running_sfm",
   "sfm_ready",
   "training",
@@ -107,6 +113,8 @@ export const STEP_LABELS: Record<string, string> = {
   created: "Upload",
   extracting_frames: "Extracting Frames...",
   frames_ready: "Frames Ready",
+  masking: "Masking...",
+  masks_ready: "Masks Ready",
   running_sfm: "Running SfM...",
   sfm_ready: "SfM Ready",
   training: "Training...",

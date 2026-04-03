@@ -8,6 +8,8 @@ class PipelineStep(str, Enum):
     CREATED = "created"
     EXTRACTING_FRAMES = "extracting_frames"
     FRAMES_READY = "frames_ready"
+    MASKING = "masking"
+    MASKS_READY = "masks_ready"
     RUNNING_SFM = "running_sfm"
     SFM_READY = "sfm_ready"
     TRAINING = "training"
@@ -44,6 +46,8 @@ class ProjectDetail(ProjectSummary):
     temporal_mode: str = "static"  # "static" | "4d"
     videos: list[VideoInfo] = []
     video_count: int = 1
+    mask_keywords: Optional[str] = None
+    mask_count: int = 0
 
 
 class SampleVideo(BaseModel):
@@ -63,6 +67,23 @@ class ExtractSettings(BaseModel):
     # window=5 means 11 candidates per target frame (~±5 neighboring samples).
     sharp_frame_selection: bool = False
     sharp_window: int = 5
+
+
+class MaskSettings(BaseModel):
+    keywords: str = "person"  # dot-separated keywords, e.g. "person.camera.tripod"
+    mode: str = "mask"  # "mask" | "transparent" | "combined"
+    invert: bool = False  # invert the mask (keep the masked region instead)
+    precision: float = 0.3  # detection confidence threshold (0-1, lower = more detections)
+    expand: int = 0  # expand mask by N pixels
+    feather: int = 0  # feather/blur mask edges by N pixels
+    use_external: bool = False  # use external AutoMasker exe instead of built-in
+
+
+class PruneSettings(BaseModel):
+    min_opacity: float = 0.1      # remove Gaussians with sigmoid(opacity) < this
+    max_scale_mult: float = 8.0   # remove Gaussians with scale > N * median
+    position_percentile: float = 99.0  # keep only within this distance percentile
+    bbox: Optional[str] = None    # crop bounding box: "xmin,ymin,zmin,xmax,ymax,zmax"
 
 
 class SfmSettings(BaseModel):
@@ -85,11 +106,18 @@ class TrainSettings(BaseModel):
     resume: bool = False
 
 
+class NovelViewSettings(BaseModel):
+    model: str = "zero123pp"  # zero123pp | wonder3d | era3d | sd_inpaint
+    num_refs: int = 4         # number of reference frames to generate from
+    output_size: int = 800    # output image size (square)
+
+
 class RefineSettings(BaseModel):
     refine_steps: int = 3000  # additional training iterations for refinement
     alpha_low: float = 0.5   # visibility transfer: low-confidence threshold
     alpha_high: float = 0.8  # visibility transfer: high-confidence threshold
     diffusion_inpaint: bool = False  # run SD inpainting for truly unseen regions
+    novel_view_model: str = "zero123pp"  # zero123pp | wonder3d | era3d | sd_inpaint
     num_novel_views: int = 8
     novel_view_weight: float = 0.3
     diffusion_steps: int = 20

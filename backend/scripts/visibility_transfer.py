@@ -303,8 +303,8 @@ def main():
                     if not valid.any():
                         continue
 
-                    us_int = us_j[valid].astype(int).clip(0, W - 1)
-                    vs_int = vs_j[valid].astype(int).clip(0, H - 1)
+                    us_int = us_j[valid].astype(int).clip(0, widths[j] - 1)
+                    vs_int = vs_j[valid].astype(int).clip(0, heights[j] - 1)
                     alpha_j_at = rendered_alphas[j][vs_int, us_int]
 
                     # Only use pixels where source view has high confidence

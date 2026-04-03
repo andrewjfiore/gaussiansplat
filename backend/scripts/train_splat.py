@@ -15,6 +15,7 @@ Usage:
 
 import argparse
 import math
+import signal
 import sys
 import time
 from pathlib import Path
@@ -23,6 +24,17 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image
+
+# Graceful early-stop: catch SIGTERM/SIGINT to break training loop and still export PLY
+_stop_requested = False
+
+def _handle_stop(signum, frame):
+    global _stop_requested
+    _stop_requested = True
+    print(f"\n[INFO] Stop requested (signal {signum}) — finishing current step and exporting PLY...", flush=True)
+
+signal.signal(signal.SIGTERM, _handle_stop)
+signal.signal(signal.SIGINT, _handle_stop)
 
 from gsplat.rendering import rasterization
 from gsplat.strategy import DefaultStrategy
@@ -279,6 +291,9 @@ def main():
 
     t0 = time.time()
     for step in range(start_step, args.max_steps + 1):
+        if _stop_requested:
+            print(f"[INFO] Early stop at step {step - 1}/{args.max_steps}", flush=True)
+            break
         idx = (step - 1) % N
         vm  = viewmats[idx : idx + 1]   # [1, 4, 4]
         Km  = Ks[idx : idx + 1]        # [1, 3, 3]

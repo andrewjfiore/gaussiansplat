@@ -19,9 +19,21 @@ import argparse
 import json
 import math
 import random
+import signal
 import sys
 import time
 from pathlib import Path
+
+# Graceful early-stop: catch SIGTERM/SIGINT to break training loop and still export PLY
+_stop_requested = False
+
+def _handle_stop(signum, frame):
+    global _stop_requested
+    _stop_requested = True
+    print(f"\n[INFO] Stop requested (signal {signum}) — finishing current step and exporting...", flush=True)
+
+signal.signal(signal.SIGTERM, _handle_stop)
+signal.signal(signal.SIGINT, _handle_stop)
 
 import numpy as np
 import torch
@@ -268,7 +280,8 @@ def main():
         # Fallback: assign uniform timestamps
         frame_timestamps = [(i, i / max(N - 1, 1)) for i in range(N)]
 
-    print(f"[INFO] Matched {len(frame_timestamps)} frames to views at {W}x{H}", flush=True)
+    n_res = len(set(zip(widths, heights)))
+    print(f"[INFO] Matched {len(frame_timestamps)} frames to views ({n_res} resolution{'s' if n_res > 1 else ''})", flush=True)
 
     # ── Load depth maps ──────────────────────────────────────────────
     use_depth = args.depth_dir is not None and args.depth_dir.exists() and args.depth_weight > 0
@@ -344,6 +357,9 @@ def main():
 
     t0 = time.time()
     for step in range(1, args.max_steps + 1):
+        if _stop_requested:
+            print(f"[INFO] Early stop at step {step - 1}/{args.max_steps}", flush=True)
+            break
         # Random frame with timestamp
         view_idx, t_norm = random.choice(frame_timestamps)
         vm = viewmats[view_idx:view_idx + 1]
@@ -398,10 +414,10 @@ def main():
             # Load depth map on-demand (keeps VRAM free)
             mono_np = np.load(depth_map_paths[view_idx]).astype(np.float32)
             mono_depth = torch.from_numpy(mono_np).to(DEVICE)
-            if mono_depth.shape != (H, W):
+            if mono_depth.shape != (heights[view_idx], widths[view_idx]):
                 mono_depth = F.interpolate(
                     mono_depth.unsqueeze(0).unsqueeze(0),
-                    size=(H, W), mode="bilinear", align_corners=False,
+                    size=(heights[view_idx], widths[view_idx]), mode="bilinear", align_corners=False,
                 ).squeeze()
             # Warm-up: ramp depth weight from 0 → full over first 20% of training
             warmup_frac = min(step / (args.max_steps * 0.2), 1.0)

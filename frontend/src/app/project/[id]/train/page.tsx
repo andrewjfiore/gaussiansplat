@@ -360,6 +360,12 @@ export default function TrainPage() {
             >
               View Splat <ArrowRight className="w-4 h-4" />
             </button>
+            <button
+              onClick={() => router.push(`/project/${id}/postprocess`)}
+              className="bg-gray-600 hover:bg-gray-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 transition"
+            >
+              Post-Process
+            </button>
           </>
         )}
       </div>

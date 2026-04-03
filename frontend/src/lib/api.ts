@@ -76,7 +76,11 @@ export const api = {
   },
 
   // Pipeline
-  extractFrames: (id: string, opts?: { fps?: number }) =>
+  extractFrames: (id: string, opts?: {
+    fps?: number;
+    sharp_frame_selection?: boolean;
+    sharp_window?: number;
+  }) =>
     request<any>(`/api/projects/${id}/pipeline/extract-frames`, {
       method: "POST",
       body: JSON.stringify(opts || {}),
@@ -108,6 +112,52 @@ export const api = {
   // Videos
   listVideos: (id: string) =>
     request<import("@/lib/types").VideoInfo[]>(`/api/projects/${id}/videos`),
+
+  // Novel View Generation
+  generateNovelViews: (id: string, opts?: {
+    model?: string; num_refs?: number; output_size?: number;
+  }) =>
+    request<{ status: string; model: string }>(`/api/projects/${id}/pipeline/generate-novel-views`, {
+      method: "POST",
+      body: JSON.stringify(opts || {}),
+    }),
+
+  // Masking
+  runMasking: (id: string, opts?: {
+    keywords?: string; mode?: string; invert?: boolean;
+    precision?: number; expand?: number; feather?: number;
+    use_external?: boolean;
+  }) =>
+    request<any>(`/api/projects/${id}/pipeline/mask`, {
+      method: "POST",
+      body: JSON.stringify(opts || {}),
+    }),
+  listMasks: (id: string) =>
+    request<{ name: string; url: string }[]>(`/api/projects/${id}/masks`),
+
+  // Post-processing
+  prunePreview: (id: string, opts?: {
+    min_opacity?: number; max_scale_mult?: number;
+    position_percentile?: number; bbox?: string;
+  }) =>
+    request<{
+      total: number; kept: number; pruned: number; pruned_pct: number;
+      by_opacity: number; by_scale: number; by_position: number;
+      median_scale: number; file_size_mb: number; estimated_output_mb: number;
+    }>(`/api/projects/${id}/prune-preview`, {
+      method: "POST",
+      body: JSON.stringify(opts || {}),
+    }),
+  pruneSplat: (id: string, opts?: {
+    min_opacity?: number; max_scale_mult?: number;
+    position_percentile?: number; bbox?: string;
+  }) =>
+    request<{ status: string; output: string }>(`/api/projects/${id}/prune`, {
+      method: "POST",
+      body: JSON.stringify(opts || {}),
+    }),
+  pruneReset: (id: string) =>
+    request<{ status: string }>(`/api/projects/${id}/prune-reset`, { method: "POST" }),
 
   // Frames
   listFrames: (id: string) => request<any[]>(`/api/projects/${id}/frames`),

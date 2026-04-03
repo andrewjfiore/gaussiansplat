@@ -227,10 +227,15 @@ class TaskRunner:
         proc = self._processes.get(project_id)
         if proc is None or proc.returncode is not None:
             return False
-        proc.terminate()
+        await manager.send_log(
+            project_id, "[INFO] Cancelling — waiting for graceful export..."
+        )
+        proc.terminate()  # SIGTERM → training scripts catch this, break loop, export PLY
         try:
-            await asyncio.wait_for(proc.wait(), timeout=5.0)
+            # Give 30s for the script to finish current step + export PLY
+            await asyncio.wait_for(proc.wait(), timeout=30.0)
         except asyncio.TimeoutError:
+            await manager.send_log(project_id, "[WARN] Graceful stop timed out — force killing")
             proc.kill()
             await proc.wait()
         self._processes.pop(project_id, None)

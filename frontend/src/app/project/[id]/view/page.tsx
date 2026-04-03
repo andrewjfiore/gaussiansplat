@@ -100,6 +100,12 @@ export default function ViewPage() {
           >
             Back to Training
           </button>
+          <button
+            onClick={() => router.push(`/project/${id}/postprocess`)}
+            className="px-3 py-1 text-sm rounded border border-amber-600 text-amber-400 hover:bg-amber-900/30"
+          >
+            Post-Process
+          </button>
           <h2 className="text-lg font-medium">3D Gaussian Splat Viewer</h2>
           {project.temporal_mode === "4d" && (
             <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-400 border border-purple-500/30">

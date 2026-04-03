@@ -5,6 +5,16 @@ const nextConfig: NextConfig = {
     // Allow large video uploads through the rewrite proxy (default is 10 MB)
     middlewareClientMaxBodySize: "500mb",
   },
+  webpack: (config) => {
+    // PlayCanvas's "module" field points to unbundled source (83MB barrel export).
+    // Force Webpack to use the pre-built UMD/CJS bundle instead.
+    config.resolve = config.resolve || {};
+    config.resolve.alias = {
+      ...config.resolve.alias,
+      playcanvas: "playcanvas/build/playcanvas.mjs",
+    };
+    return config;
+  },
   async rewrites() {
     // NOTE: These rewrites run server-side — they work fine when Quest loads
     // pages from http://192.168.1.x:3000 because the Next.js server itself

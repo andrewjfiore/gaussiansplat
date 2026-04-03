@@ -12,7 +12,7 @@ from ..config import settings
 from ..database import db_session
 from ..models import (
     ProjectCreate, ProjectSummary, ProjectDetail, PipelineStep,
-    SAMPLE_VIDEOS, VideoInfo,
+    SAMPLE_VIDEOS, VideoInfo, PruneSettings,
 )
 from ..services.equirect import is_equirectangular
 from ..services.compress import ensure_ksplat
@@ -140,6 +140,8 @@ async def get_project(project_id: str):
             temporal_mode=row["temporal_mode"] or "static",
             videos=videos,
             video_count=max(len(videos), 1),
+            mask_keywords=row["mask_keywords"],
+            mask_count=row["mask_count"] or 0,
         )
 
 
@@ -379,6 +381,125 @@ async def get_temporal_info(project_id: str):
         "available": len(frames) > 0,
         "frame_count": len(frames),
     }
+
+
+@router.get("/{project_id}/masks")
+async def list_masks(project_id: str):
+    """List generated mask images for preview."""
+    masks_dir = _project_dir(project_id) / "masks"
+    if not masks_dir.exists():
+        return []
+    imgs = sorted(masks_dir.glob("*.png"))
+    return [{"name": img.name, "url": f"/api/projects/{project_id}/masks/{img.name}"} for img in imgs]
+
+
+@router.get("/{project_id}/masks/{filename}")
+async def get_mask(project_id: str, filename: str):
+    path = _project_dir(project_id) / "masks" / filename
+    if not path.exists():
+        raise HTTPException(404)
+    return FileResponse(path, media_type="image/png")
+
+
+@router.post("/{project_id}/prune-preview")
+async def prune_preview(project_id: str, body: PruneSettings | None = None):
+    """Preview how many Gaussians would be pruned — fast, no file writes."""
+    body = body or PruneSettings()
+    ply_path = _project_dir(project_id) / "output" / "point_cloud.ply"
+    if not ply_path.exists():
+        raise HTTPException(404, "No PLY found")
+
+    import numpy as np
+
+    # Read PLY header + data
+    with open(ply_path, "rb") as f:
+        props = []
+        n_verts = 0
+        while True:
+            line = f.readline().decode("utf-8", errors="replace")
+            if line.startswith("element vertex"):
+                n_verts = int(line.split()[-1])
+            if line.startswith("property float"):
+                props.append(line.split()[-1])
+            if "end_header" in line:
+                break
+        n_floats = len(props)
+        data = np.frombuffer(f.read(n_verts * n_floats * 4), dtype=np.float32).reshape(n_verts, n_floats)
+
+    prop_idx = {name: i for i, name in enumerate(props)}
+
+    opacity = 1.0 / (1.0 + np.exp(-data[:, prop_idx["opacity"]]))
+    scales = np.stack([np.exp(data[:, prop_idx[f"scale_{i}"]]) for i in range(3)], axis=1)
+    max_scale = scales.max(axis=1)
+    med_scale = float(np.median(max_scale))
+    positions = data[:, :3]
+    dists = np.linalg.norm(positions - positions.mean(axis=0), axis=1)
+
+    keep_op = opacity >= body.min_opacity
+    keep_sc = max_scale <= med_scale * body.max_scale_mult
+    keep_pos = dists <= np.percentile(dists, body.position_percentile)
+    keep = keep_op & keep_sc & keep_pos
+
+    return {
+        "total": int(n_verts),
+        "kept": int(keep.sum()),
+        "pruned": int(n_verts - keep.sum()),
+        "pruned_pct": round((n_verts - keep.sum()) / n_verts * 100, 1),
+        "by_opacity": int((~keep_op).sum()),
+        "by_scale": int((~keep_sc).sum()),
+        "by_position": int((~keep_pos).sum()),
+        "median_scale": round(med_scale, 6),
+        "file_size_mb": round(ply_path.stat().st_size / 1024 / 1024, 1),
+        "estimated_output_mb": round(ply_path.stat().st_size / 1024 / 1024 * keep.sum() / n_verts, 1),
+    }
+
+
+@router.post("/{project_id}/prune")
+async def prune_splat(project_id: str, body: PruneSettings | None = None):
+    """Apply pruning and overwrite the PLY (backs up original)."""
+    import subprocess, sys
+    body = body or PruneSettings()
+    proj = _project_dir(project_id)
+    ply_path = proj / "output" / "point_cloud.ply"
+    if not ply_path.exists():
+        raise HTTPException(404, "No PLY found")
+
+    # Backup original if not already backed up
+    backup = proj / "output" / "point_cloud_original.ply"
+    if not backup.exists():
+        import shutil
+        shutil.copy2(ply_path, backup)
+
+    prune_script = Path(__file__).resolve().parents[2] / "scripts" / "prune_splat.py"
+    cmd = [
+        sys.executable, str(prune_script),
+        "--input", str(backup),
+        "--output", str(ply_path),
+        "--min_opacity", str(body.min_opacity),
+        "--max_scale_mult", str(body.max_scale_mult),
+        "--position_percentile", str(body.position_percentile),
+    ]
+    if body.bbox:
+        cmd += ["--bbox", body.bbox]
+
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    if result.returncode != 0:
+        raise HTTPException(500, f"Prune failed: {result.stderr[-200:]}")
+
+    return {"status": "ok", "output": result.stdout}
+
+
+@router.post("/{project_id}/prune-reset")
+async def prune_reset(project_id: str):
+    """Restore the original unpruned PLY."""
+    proj = _project_dir(project_id)
+    backup = proj / "output" / "point_cloud_original.ply"
+    ply_path = proj / "output" / "point_cloud.ply"
+    if not backup.exists():
+        raise HTTPException(404, "No backup found — PLY was never pruned")
+    import shutil
+    shutil.copy2(backup, ply_path)
+    return {"status": "ok", "restored": True}
 
 
 @router.get("/{project_id}/checkpoints")

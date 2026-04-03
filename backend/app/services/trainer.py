@@ -9,6 +9,7 @@ _LEGACY_SCRIPT      = Path(__file__).resolve().parents[2] / "scripts" / "train_s
 _4D_SCRIPT          = Path(__file__).resolve().parents[2] / "scripts" / "train_4d.py"
 _VISIBILITY_SCRIPT  = Path(__file__).resolve().parents[2] / "scripts" / "visibility_transfer.py"
 _INPAINT_SCRIPT     = Path(__file__).resolve().parents[2] / "scripts" / "diffusion_inpaint.py"
+_NOVEL_VIEW_SCRIPT  = Path(__file__).resolve().parents[2] / "scripts" / "generate_novel_views.py"
 
 
 def build_train_cmd(
@@ -96,6 +97,35 @@ def build_inpaint_cmd(
         "--steps", str(steps),
         "--guidance", str(guidance),
     ]
+
+
+def build_novel_view_cmd(
+    input_dir: Path,
+    output_dir: Path,
+    model: str = "zero123pp",
+    num_refs: int = 4,
+    output_size: int = 800,
+) -> list[str]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return [
+        sys.executable, str(_NOVEL_VIEW_SCRIPT),
+        "--input_dir", str(input_dir),
+        "--output_dir", str(output_dir),
+        "--model", model,
+        "--num_refs", str(num_refs),
+        "--output_size", str(output_size),
+    ]
+
+
+def parse_novel_view_line(line: str) -> Optional[dict]:
+    """Parse novel view generation progress."""
+    import re
+    m = re.match(r"\[NOVEL\]", line)
+    if m:
+        return {"percent": -1}
+    if "Complete:" in line:
+        return {"percent": 100}
+    return None
 
 
 def parse_trainer_line(line: str) -> Optional[dict]:

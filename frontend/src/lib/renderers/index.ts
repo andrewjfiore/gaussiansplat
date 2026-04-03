@@ -1,14 +1,11 @@
 /**
  * renderers/index.ts — Auto-detect best available renderer.
  *
- * WebGPU + no VR → Mkkellogg (WebGL) with native gsplat support.
- * WebXR VR mode is only supported through Mkkellogg (Three.js WebGLRenderer).
- *
- * Currently ships only the Mkkellogg renderer. The Visionary (WebGPU)
- * renderer can be added here when visionary-lab supports WebXR.
+ * Primary: PlayCanvas (WebGPU + GPU sorting, automatic WebGL2 fallback)
+ * Fallback: Mkkellogg (Three.js WebGL, if PlayCanvas fails to init)
  */
 
-import { MkkelloggRenderer, SplatRenderer, RendererStats } from "./mkkellogg";
+import type { SplatRenderer, RendererStats } from "./mkkellogg";
 
 export type { SplatRenderer, RendererStats };
 
@@ -16,15 +13,15 @@ export async function createRenderer(
   url: string,
   container: HTMLElement
 ): Promise<SplatRenderer & { type: "webgpu" | "webgl" }> {
-  // Visionary (WebGPU) renderer placeholder — add when visionary-lab ships
-  // const gpuAvailable = typeof navigator !== "undefined" &&
-  //   navigator.gpu !== undefined &&
-  //   (await navigator.gpu.requestAdapter()) !== null;
-  // const vrRequested = new URLSearchParams(location.search).has("vr");
-  // if (gpuAvailable && !vrRequested) {
-  //   const { VisionaryRenderer } = await import("./visionary");
-  //   return new VisionaryRenderer(url, container);
-  // }
+  // Try PlayCanvas first (WebGPU + GPU-driven sorting)
+  try {
+    const { PlayCanvasRenderer } = await import("./playcanvas");
+    return new PlayCanvasRenderer(container);
+  } catch (e) {
+    console.warn("PlayCanvas renderer failed to init, falling back to mkkellogg:", e);
+  }
 
+  // Fallback to mkkellogg (Three.js WebGL)
+  const { MkkelloggRenderer } = await import("./mkkellogg");
   return new MkkelloggRenderer(container);
 }

@@ -11,7 +11,9 @@ def _colmap() -> str:
     return str(settings.colmap_bin)
 
 
-def build_feature_extractor_cmd(db_path: Path, image_path: Path, single_camera: bool = True) -> list[str]:
+def build_feature_extractor_cmd(db_path: Path, image_path: Path,
+                                single_camera: bool = True,
+                                mask_path: Path | None = None) -> list[str]:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
         _colmap(), "feature_extractor",
@@ -20,6 +22,8 @@ def build_feature_extractor_cmd(db_path: Path, image_path: Path, single_camera: 
     ]
     if single_camera:
         cmd += ["--ImageReader.single_camera", "1"]
+    if mask_path and mask_path.exists():
+        cmd += ["--ImageReader.mask_path", str(mask_path)]
     return cmd
 
 

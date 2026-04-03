@@ -50,7 +50,7 @@ export function SplatViewerFPS({ plyUrl, ksplatUrl, format }: Props) {
         if (disposed) { r.dispose(); return; }
         rendererRef.current = r;
         setRendererType(r.type);
-        await r.load(url, format);
+        await r.load(url);
         if (!disposed) setLoading(false);
       })
       .catch((err) => {
