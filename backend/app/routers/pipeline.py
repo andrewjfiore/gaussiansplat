@@ -1,12 +1,19 @@
 import asyncio
+import json
 import logging
+import shutil
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 
 from ..config import settings
-from ..database import db_session
-from ..models import PipelineStep, ExtractSettings, SfmSettings, TrainSettings, RefineSettings, MaskSettings, NovelViewSettings
+from ..database import db_session, get_db
+from ..models import (
+    PipelineStep, ExtractSettings, SfmSettings, TrainSettings,
+    RefineSettings, MaskSettings, NovelViewSettings,
+    CleanupSettings, SceneConfigResponse, SceneStatsResponse,
+    PortraitSettings,
+)
 from ..pipeline.task_runner import task_runner
 from ..services import ffmpeg as ffmpeg_svc
 from ..services import colmap as colmap_svc
@@ -16,6 +23,11 @@ from ..services.disk import check_disk_space, SPACE_REQUIREMENTS_MB
 from ..services.frame_quality import filter_frames, select_sharpest_per_bucket
 from ..services import masking as mask_svc
 from ..services.sfm_quality import evaluate_sfm_quality, export_sparse_ply
+from ..services import lod as lod_svc
+from ..services import coverage as coverage_svc
+from ..services import portrait as portrait_svc
+from ..services.scene_analysis import analyze_scene
+from ..services.cleanup import run_cleanup
 from ..ws.manager import manager
 
 logger = logging.getLogger(__name__)
@@ -27,7 +39,7 @@ def _project_dir(pid: str) -> Path:
     return settings.data_dir / pid
 
 
-# Pipeline step prerequisites: action → set of valid current steps
+# Pipeline step prerequisites: action -> set of valid current steps
 # Allows redo from any later step (e.g., re-extract frames from sfm_ready)
 _STEP_PREREQUISITES: dict[str, set[PipelineStep]] = {
     "extract-frames": {
@@ -51,6 +63,10 @@ _STEP_PREREQUISITES: dict[str, set[PipelineStep]] = {
     },
     "extract-mesh": {PipelineStep.TRAINING_COMPLETE},
     "refine": {PipelineStep.TRAINING_COMPLETE},
+    "portrait": {
+        PipelineStep.CREATED, PipelineStep.FRAMES_READY,
+        PipelineStep.TRAINING_COMPLETE, PipelineStep.FAILED,
+    },
 }
 
 
@@ -71,7 +87,7 @@ async def _check_precondition(project_id: str, action: str) -> dict:
     if current not in allowed:
         raise HTTPException(
             422,
-            f"Cannot run '{action}' — project is in step '{current.value}'. "
+            f"Cannot run '{action}' -- project is in step '{current.value}'. "
             f"Expected one of: {', '.join(s.value for s in allowed)}",
         )
 
@@ -139,7 +155,7 @@ async def extract_frames(project_id: str, body: ExtractSettings | None = None):
     bucket_size = (2 * sharp_window) + 1
     sample_fps = body.fps * bucket_size if sharp_mode else body.fps
 
-    # Build extraction commands — one per video
+    # Build extraction commands -- one per video
     cmds = []
     for vr in video_rows:
         vid_idx = vr["video_index"]
@@ -182,7 +198,7 @@ async def extract_frames(project_id: str, body: ExtractSettings | None = None):
                     await manager.send_log(
                         project_id,
                         f"[INFO] Sharp-frame selection: kept {sharp_res.selected_frames}/"
-                        f"{sharp_res.total_frames} (window=±{sharp_window}, bucket={bucket_size})",
+                        f"{sharp_res.total_frames} (window=+-{sharp_window}, bucket={bucket_size})",
                     )
                 except Exception as e:
                     await manager.send_log(project_id, f"[WARN] Sharp-frame selection skipped: {e}")
@@ -238,7 +254,7 @@ async def run_masking(project_id: str, body: MaskSettings | None = None):
     masks_dir = proj / "masks"
 
     if not frames_dir.exists() or not any(frames_dir.glob("*.jpg")):
-        raise HTTPException(400, "No extracted frames — run frame extraction first")
+        raise HTTPException(400, "No extracted frames -- run frame extraction first")
 
     # Choose masking backend
     if body.use_external:
@@ -305,7 +321,7 @@ async def generate_novel_views(project_id: str, body: NovelViewSettings | None =
     novel_dir = proj / "novel_views"
 
     if not frames_dir.exists() or not any(frames_dir.glob("*.jpg")):
-        raise HTTPException(400, "No frames — extract frames first")
+        raise HTTPException(400, "No frames -- extract frames first")
 
     cmd = trainer_svc.build_novel_view_cmd(
         input_dir=frames_dir,
@@ -366,7 +382,7 @@ async def run_sfm(project_id: str, body: SfmSettings | None = None):
         video_count = (await cursor.fetchone())[0]
 
     if video_count > 1:
-        # Multiple cameras → disable single_camera, upgrade matcher
+        # Multiple cameras -> disable single_camera, upgrade matcher
         body.single_camera = False
         if body.matcher_type == "sequential_matcher":
             body.matcher_type = "exhaustive_matcher"
@@ -384,7 +400,6 @@ async def run_sfm(project_id: str, body: SfmSettings | None = None):
                 )
 
             # Step 1: Feature extraction
-            # Pass mask path if masks exist — COLMAP ignores masked pixels in feature extraction
             masks_dir = proj / "masks"
             mask_path = masks_dir if masks_dir.exists() and any(masks_dir.glob("*.png")) else None
             if mask_path:
@@ -395,7 +410,7 @@ async def run_sfm(project_id: str, body: SfmSettings | None = None):
             rc = await task_runner.run(
                 project_id, cmd, step="sfm", substep="feature_extraction",
                 line_parser=colmap_svc.parse_colmap_line,
-                timeout=1800,  # 30 min
+                timeout=1800,
             )
             if rc != 0:
                 await _update_step(project_id, PipelineStep.FAILED, "Feature extraction failed")
@@ -406,7 +421,7 @@ async def run_sfm(project_id: str, body: SfmSettings | None = None):
             rc = await task_runner.run(
                 project_id, cmd, step="sfm", substep="matching",
                 line_parser=colmap_svc.parse_colmap_line,
-                timeout=3600,  # 1 hour
+                timeout=3600,
             )
             if rc != 0:
                 await _update_step(project_id, PipelineStep.FAILED, "Matching failed")
@@ -417,7 +432,7 @@ async def run_sfm(project_id: str, body: SfmSettings | None = None):
             rc = await task_runner.run(
                 project_id, cmd, step="sfm", substep="mapping",
                 line_parser=colmap_svc.parse_colmap_line,
-                timeout=3600,  # 1 hour
+                timeout=3600,
             )
             if rc != 0:
                 await _update_step(project_id, PipelineStep.FAILED, "Mapping failed")
@@ -426,7 +441,6 @@ async def run_sfm(project_id: str, body: SfmSettings | None = None):
             # Find the sparse model directory (usually sparse/0)
             sparse_model = sparse_dir / "0"
             if not sparse_model.exists():
-                # Try to find any numbered subdirectory
                 subdirs = sorted(d for d in sparse_dir.iterdir() if d.is_dir())
                 if subdirs:
                     sparse_model = subdirs[0]
@@ -475,20 +489,20 @@ async def run_sfm(project_id: str, body: SfmSettings | None = None):
             rc = await task_runner.run(
                 project_id, cmd, step="sfm", substep="undistortion",
                 line_parser=colmap_svc.parse_colmap_line,
-                timeout=1800,  # 30 min
+                timeout=1800,
             )
             if rc != 0:
                 await _update_step(project_id, PipelineStep.FAILED, "Undistortion failed")
                 return
 
-            # Optional: Dense reconstruction (patch_match_stereo + stereo_fusion)
+            # Optional: Dense reconstruction
             if getattr(body, "enable_dense", False):
                 await manager.send_log(project_id, "[INFO] Running dense stereo matching...")
                 cmd = colmap_svc.build_patch_match_stereo_cmd(dense_dir)
                 rc = await task_runner.run(
                     project_id, cmd, step="sfm", substep="dense_stereo",
                     line_parser=colmap_svc.parse_colmap_line,
-                    timeout=3600,  # 1 hour
+                    timeout=3600,
                 )
                 if rc != 0:
                     await manager.send_log(project_id, "[WARN] Dense stereo failed, continuing with sparse")
@@ -510,6 +524,42 @@ async def run_sfm(project_id: str, body: SfmSettings | None = None):
 
     asyncio.create_task(run())
     return {"status": "started"}
+
+
+@router.get("/scene-analysis")
+async def scene_analysis(project_id: str):
+    """Analyze COLMAP output and return recommended training parameters."""
+    proj = _project_dir(project_id)
+    if not proj.exists():
+        raise HTTPException(404, "Project not found")
+
+    loop = asyncio.get_event_loop()
+    config = await loop.run_in_executor(None, analyze_scene, proj)
+
+    stats_resp = None
+    if config.stats is not None:
+        stats_resp = SceneStatsResponse(
+            num_points=config.stats.num_points,
+            num_cameras=config.stats.num_cameras,
+            num_images=config.stats.num_images,
+            bbox_min=config.stats.bbox_min,
+            bbox_max=config.stats.bbox_max,
+            centroid=config.stats.centroid,
+            scene_radius=config.stats.scene_radius,
+            mean_point_density=config.stats.mean_point_density,
+            camera_baseline=config.stats.camera_baseline,
+        )
+
+    return SceneConfigResponse(
+        max_steps=config.max_steps,
+        phase1_steps=config.phase1_steps,
+        phase2_steps=config.phase2_steps,
+        densify_grad_thresh=config.densify_grad_thresh,
+        sh_degree=config.sh_degree,
+        scene_complexity=config.scene_complexity,
+        reasoning=config.reasoning,
+        stats=stats_resp,
+    )
 
 
 @router.post("/train")
@@ -536,10 +586,10 @@ async def train_splat(project_id: str, body: TrainSettings | None = None):
                 "Denoising skipped for project=%s: %s", project_id, result.skipped_reason,
             )
         elif result.success and denoised_path.exists():
-            import shutil
-            shutil.copy2(denoised_path, points3d_path)
+            import shutil as _shutil
+            _shutil.copy2(denoised_path, points3d_path)
             logger.info(
-                "Denoising applied: %d → %d points",
+                "Denoising applied: %d -> %d points",
                 result.points_before, result.points_after,
             )
 
@@ -554,11 +604,15 @@ async def train_splat(project_id: str, body: TrainSettings | None = None):
             (temporal_mode_val, project_id),
         )
 
-    # Bridge for depth estimation logs: callable from sync thread → async WS
+    # Bridge for depth estimation logs: callable from sync thread -> async WS
     _loop = asyncio.get_event_loop()
 
     def _depth_log_sync(msg: str):
         asyncio.run_coroutine_threadsafe(manager.send_log(project_id, msg), _loop)
+
+    use_two_phase = body.two_phase
+    phase1_steps = body.phase1_steps or int(body.max_steps * 0.8)
+    phase2_steps = body.phase2_steps or (body.max_steps - phase1_steps)
 
     async def run():
         try:
@@ -585,31 +639,82 @@ async def train_splat(project_id: str, body: TrainSettings | None = None):
                         await loop.run_in_executor(None, _run_depth)
                         await manager.send_log(project_id, "[INFO] Depth estimation complete")
                     except Exception as e:
-                        await manager.send_log(project_id, f"[WARN] Depth estimation failed: {e} — continuing without")
+                        await manager.send_log(project_id, f"[WARN] Depth estimation failed: {e} -- continuing without")
                         depth_dir = None
 
             # Find frame manifest for 4D mode
             manifest_path = proj / "frames" / "manifest.json"
 
-            cmd = trainer_svc.build_train_cmd(data_dir, result_dir, body.max_steps,
-                                              use_scaffold=use_scaffold, voxel_size=voxel_size,
-                                              resume=getattr(body, "resume", False),
-                                              sh_degree=getattr(body, "sh_degree", 0),
-                                              depth_dir=depth_dir,
-                                              depth_weight=depth_weight,
-                                              temporal_mode=getattr(body, "temporal_mode", "static"),
-                                              temporal_smoothness=getattr(body, "temporal_smoothness", 0.01),
-                                              manifest_path=manifest_path)
-            rc = await task_runner.run(
-                project_id, cmd, step="train", substep="training",
-                line_parser=trainer_svc.parse_trainer_line,
-                timeout=7200,  # 2 hours max for training
-                requires_gpu=True,
-            )
-            if rc == 0:
-                await _update_step(project_id, PipelineStep.TRAINING_COMPLETE)
+            if use_two_phase and temporal_mode_val == "static":
+                # Two-phase training (our branch feature)
+                phases = trainer_svc.build_two_phase_cmds(
+                    data_dir, result_dir,
+                    phase1_steps=phase1_steps,
+                    phase2_steps=phase2_steps,
+                    sh_degree=body.sh_degree,
+                    densify_grad_thresh=body.densify_grad_thresh,
+                )
+
+                for phase in phases:
+                    await manager.send_log(
+                        project_id, f"--- {phase.label} ---"
+                    )
+                    await manager.send_progress(
+                        project_id, "train", phase.label,
+                        (phase.step_offset / phase.total_steps) * 100,
+                    )
+
+                    phase_parser = trainer_svc.make_phase_line_parser(phase)
+                    rc = await task_runner.run(
+                        project_id, phase.cmd,
+                        step="train", substep=phase.label,
+                        line_parser=phase_parser,
+                        timeout=7200,
+                        requires_gpu=True,
+                    )
+                    if rc != 0:
+                        await _update_step(
+                            project_id, PipelineStep.FAILED,
+                            f"{phase.label} failed (exit code {rc})",
+                        )
+                        return
             else:
-                await _update_step(project_id, PipelineStep.FAILED, f"Training failed (exit code {rc})")
+                # Single-phase training (main branch path, also handles 4D)
+                cmd = trainer_svc.build_train_cmd(
+                    data_dir, result_dir, body.max_steps,
+                    use_scaffold=use_scaffold, voxel_size=voxel_size,
+                    resume=getattr(body, "resume", False),
+                    sh_degree=getattr(body, "sh_degree", 0),
+                    depth_dir=depth_dir,
+                    depth_weight=depth_weight,
+                    temporal_mode=getattr(body, "temporal_mode", "static"),
+                    temporal_smoothness=getattr(body, "temporal_smoothness", 0.01),
+                    manifest_path=manifest_path,
+                    densify_grad_thresh=body.densify_grad_thresh,
+                )
+                rc = await task_runner.run(
+                    project_id, cmd, step="train", substep="training",
+                    line_parser=trainer_svc.parse_trainer_line,
+                    timeout=7200,
+                    requires_gpu=True,
+                )
+                if rc != 0:
+                    await _update_step(
+                        project_id, PipelineStep.FAILED,
+                        f"Training failed (exit code {rc})",
+                    )
+                    return
+
+            # Generate LOD versions as a post-training step
+            try:
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(
+                    None, lod_svc.generate_lod, result_dir
+                )
+            except Exception as lod_err:
+                logger.warning("LOD generation failed for %s: %s",
+                               project_id, lod_err)
+            await _update_step(project_id, PipelineStep.TRAINING_COMPLETE)
         except Exception as e:
             logger.exception(f"Training failed for {project_id}")
             await _update_step(project_id, PipelineStep.FAILED, str(e))
@@ -620,11 +725,7 @@ async def train_splat(project_id: str, body: TrainSettings | None = None):
 
 @router.get("/health")
 async def pipeline_health(project_id: str):
-    """Check if a pipeline task is actually running for this project.
-
-    The frontend polls this to detect silent failures — e.g. a subprocess
-    crashed but the DB step was never updated from 'training'.
-    """
+    """Check if a pipeline task is actually running for this project."""
     running = task_runner.is_running(project_id)
     async with db_session() as db:
         cursor = await db.execute(
@@ -635,16 +736,15 @@ async def pipeline_health(project_id: str):
         raise HTTPException(404, "Project not found")
 
     step = row["step"]
-    # Stale = DB says an active step but no subprocess is alive
     active_steps = {
         PipelineStep.EXTRACTING_FRAMES.value,
         PipelineStep.MASKING.value,
         PipelineStep.RUNNING_SFM.value,
         PipelineStep.TRAINING.value,
+        PipelineStep.PORTRAIT.value,
     }
     stale = step in active_steps and not running
 
-    # Auto-recover: mark stale projects as failed so the UI shows retry
     if stale:
         error_msg = "Process exited unexpectedly"
         await _update_step(project_id, PipelineStep.FAILED, error_msg)
@@ -655,7 +755,6 @@ async def pipeline_health(project_id: str):
 
 @router.post("/cancel")
 async def cancel_pipeline(project_id: str):
-    # Check if this is a training step — graceful stop exports PLY
     async with db_session() as db_c:
         cursor = await db_c.execute("SELECT step FROM projects WHERE id = ?", (project_id,))
         row = await cursor.fetchone()
@@ -664,12 +763,11 @@ async def cancel_pipeline(project_id: str):
     cancelled = await task_runner.cancel(project_id)
     if cancelled:
         if is_training:
-            # Check if a PLY was exported during graceful shutdown
             ply_path = _project_dir(project_id) / "output" / "point_cloud.ply"
             if ply_path.exists():
                 await _update_step(project_id, PipelineStep.TRAINING_COMPLETE)
                 await manager.send_log(
-                    project_id, "[INFO] Training stopped early — PLY exported successfully"
+                    project_id, "[INFO] Training stopped early -- PLY exported successfully"
                 )
             else:
                 await _update_step(project_id, PipelineStep.FAILED, "Cancelled by user (no PLY exported)")
@@ -680,10 +778,7 @@ async def cancel_pipeline(project_id: str):
 
 @router.post("/extract-mesh")
 async def extract_mesh(project_id: str):
-    """
-    Kick off SuGaR mesh extraction in the background.
-    The resulting .glb will be available at GET /api/projects/{id}/mesh.
-    """
+    """Kick off SuGaR mesh extraction in the background."""
     import sys
     await _check_precondition(project_id, "extract-mesh")
     if task_runner.is_running(project_id + "_mesh"):
@@ -692,7 +787,7 @@ async def extract_mesh(project_id: str):
 
     ply_path = proj / "output" / "point_cloud.ply"
     if not ply_path.exists():
-        raise HTTPException(400, "Training not complete — no .ply found")
+        raise HTTPException(400, "Training not complete -- no .ply found")
 
     output_dir = proj / "output"
     glb_path = output_dir / "mesh.glb"
@@ -701,14 +796,12 @@ async def extract_mesh(project_id: str):
         try:
             sugar_script = Path(__file__).resolve().parents[3] / "scripts" / "extract_mesh.py"
             if not sugar_script.exists():
-                # Fallback: use open3d ball-pivoting for a basic mesh
                 sugar_script = None
 
             if sugar_script:
                 cmd = [sys.executable, str(sugar_script),
                        "--ply", str(ply_path), "--output", str(glb_path)]
             else:
-                # Simple fallback: convert PLY to GLB via open3d
                 cmd = [sys.executable, "-c",
                        f"import open3d as o3d; m=o3d.io.read_point_cloud('{ply_path}'); "
                        f"mesh,_=m.compute_convex_hull(); o3d.io.write_triangle_mesh('{glb_path}', mesh)"]
@@ -728,12 +821,8 @@ async def extract_mesh(project_id: str):
 
 @router.post("/refine")
 async def refine_splat(project_id: str, body: RefineSettings | None = None):
-    """
-    Run multi-stage refinement: visibility transfer → confidence-aware training
-    → (optional) diffusion inpainting → final training pass.
-
-    Each stage runs as a separate subprocess — VRAM is fully freed between stages.
-    """
+    """Run multi-stage refinement: visibility transfer -> confidence-aware training
+    -> (optional) diffusion inpainting -> final training pass."""
     body = body or RefineSettings()
     row = await _check_precondition(project_id, "refine")
     proj = _project_dir(project_id)
@@ -747,7 +836,7 @@ async def refine_splat(project_id: str, body: RefineSettings | None = None):
 
     checkpoint = ckpt_path if ckpt_path.exists() else ply_path
     if not ply_path.exists():
-        raise HTTPException(400, "Training not complete — no .ply found")
+        raise HTTPException(400, "Training not complete -- no .ply found")
 
     async def run():
         try:
@@ -798,9 +887,8 @@ async def refine_splat(project_id: str, body: RefineSettings | None = None):
                     timeout=3600, requires_gpu=True,
                 )
                 if rc != 0:
-                    await manager.send_log(project_id, "[WARN] Inpainting failed — skipping final pass")
+                    await manager.send_log(project_id, "[WARN] Inpainting failed -- skipping final pass")
                 else:
-                    # Stage 4: Final training with inpainted views
                     await manager.send_log(project_id, "[INFO] Stage 4: Final training with inpainted views...")
                     cmd = trainer_svc.build_train_cmd(
                         data_dir, result_dir, body.refine_steps,
@@ -822,3 +910,257 @@ async def refine_splat(project_id: str, body: RefineSettings | None = None):
 
     asyncio.create_task(run())
     return {"status": "started"}
+
+
+@router.post("/cleanup")
+async def run_cleanup_endpoint(project_id: str, body: CleanupSettings | None = None):
+    body = body or CleanupSettings()
+    proj = _project_dir(project_id)
+    if not proj.exists():
+        raise HTTPException(404, "Project not found")
+
+    output_dir = proj / "output"
+    ply_files = list(output_dir.rglob("*.ply"))
+    ply_files = [f for f in ply_files if f.stem != "point_cloud_original"]
+    if not ply_files:
+        raise HTTPException(400, "No training output (.ply) found")
+
+    ply_path = ply_files[0]
+
+    async def run():
+        loop = asyncio.get_event_loop()
+        try:
+            await _update_step(project_id, PipelineStep.CLEANING)
+            await manager.send_status(project_id, "cleanup", "running")
+
+            async def on_progress(msg: str, pct: float):
+                await manager.send_progress(project_id, "cleanup", "cleaning", pct)
+                await manager.send_log(project_id, msg)
+
+            def sync_progress(msg: str, pct: float):
+                asyncio.run_coroutine_threadsafe(on_progress(msg, pct), loop)
+
+            stats = await loop.run_in_executor(
+                None,
+                lambda: run_cleanup(
+                    ply_path,
+                    sor_k=body.sor_k,
+                    sor_std=body.sor_std,
+                    sparse_min_neighbors=body.sparse_min_neighbors,
+                    large_splat_percentile=body.large_splat_percentile,
+                    opacity_threshold=body.opacity_threshold,
+                    bg_std_multiplier=body.bg_std_multiplier,
+                    on_progress=sync_progress,
+                ),
+            )
+
+            # Store cleanup stats in DB
+            stats_json = json.dumps(stats.to_dict())
+            async with db_session() as db_cl:
+                await db_cl.execute(
+                    "UPDATE projects SET cleanup_stats = ? WHERE id = ?",
+                    (stats_json, project_id),
+                )
+
+            await _update_step(project_id, PipelineStep.TRAINING_COMPLETE)
+            await manager.send_status(project_id, "cleanup", "completed")
+            await manager.broadcast(project_id, {
+                "type": "cleanup_complete",
+                **stats.to_dict(),
+            })
+
+        except Exception as e:
+            logger.exception("Cleanup failed for %s", project_id)
+            await _update_step(project_id, PipelineStep.TRAINING_COMPLETE, None)
+            await manager.send_status(project_id, "cleanup", "failed", str(e))
+
+    asyncio.create_task(run())
+    return {"status": "started"}
+
+
+@router.get("/cleanup/stats")
+async def get_cleanup_stats(project_id: str):
+    async with db_session() as db:
+        cursor = await db.execute(
+            "SELECT cleanup_stats FROM projects WHERE id = ?", (project_id,)
+        )
+        row = await cursor.fetchone()
+        if not row:
+            raise HTTPException(404, "Project not found")
+        raw = row["cleanup_stats"]
+        if not raw:
+            return {"has_stats": False}
+        return {"has_stats": True, **json.loads(raw)}
+
+
+@router.post("/cleanup/undo")
+async def undo_cleanup(project_id: str):
+    proj = _project_dir(project_id)
+    if not proj.exists():
+        raise HTTPException(404, "Project not found")
+
+    output_dir = proj / "output"
+    backups = list(output_dir.rglob("point_cloud_original.ply"))
+    if not backups:
+        raise HTTPException(400, "No cleanup backup found")
+
+    backup_path = backups[0]
+    ply_path = backup_path.parent / "point_cloud.ply"
+
+    shutil.copy2(backup_path, ply_path)
+    backup_path.unlink()
+
+    async with db_session() as db:
+        await db.execute(
+            "UPDATE projects SET cleanup_stats = NULL WHERE id = ?", (project_id,)
+        )
+
+    logger.info("Cleanup undone for project %s", project_id)
+    return {"status": "restored"}
+
+
+@router.get("/coverage")
+async def get_coverage(project_id: str):
+    proj = _project_dir(project_id)
+    if not proj.exists():
+        raise HTTPException(404, "Project not found")
+
+    try:
+        result = await asyncio.get_event_loop().run_in_executor(
+            None, coverage_svc.analyze_coverage, proj
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    except Exception as e:
+        logger.exception("Coverage analysis failed for %s", project_id)
+        raise HTTPException(500, f"Coverage analysis failed: {e}")
+
+    return {
+        "overall_score": result.overall_score,
+        "direction_scores": result.direction_scores,
+        "gaps": [
+            {"direction": g.direction, "score": g.score, "recommendation": g.recommendation}
+            for g in result.gaps
+        ],
+        "grid_data": result.grid_data,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Portrait Mode endpoints
+# ---------------------------------------------------------------------------
+
+
+def _find_portrait_image(proj: Path) -> Path | None:
+    """Find a portrait image in the project's input/ directory."""
+    input_dir = proj / "input"
+    if not input_dir.exists():
+        return None
+    for ext in ("*.jpg", "*.jpeg", "*.png", "*.webp"):
+        imgs = sorted(input_dir.glob(ext))
+        if imgs:
+            return imgs[0]
+    # Fallback: check frames directory for an extracted frame
+    frames_dir = proj / "frames"
+    if frames_dir.exists():
+        jpgs = sorted(frames_dir.glob("*.jpg"))
+        if jpgs:
+            return jpgs[0]
+    return None
+
+
+@router.post("/portrait")
+async def run_portrait(project_id: str, body: PortraitSettings | None = None):
+    """Run the portrait-to-Gaussian pipeline on a single portrait image."""
+    body = body or PortraitSettings()
+    await _check_precondition(project_id, "portrait")
+
+    proj = _project_dir(project_id)
+    image_path = _find_portrait_image(proj)
+    if image_path is None:
+        raise HTTPException(
+            400,
+            "No portrait image found. Upload a portrait image first "
+            "(POST /api/projects/{id}/upload-portrait).",
+        )
+
+    output_dir = proj / "output"
+    _loop = asyncio.get_event_loop()
+
+    async def run():
+        try:
+            await _update_step(project_id, PipelineStep.PORTRAIT)
+            await manager.send_status(project_id, "portrait", "running")
+            await manager.send_log(
+                project_id,
+                f"[INFO] Starting portrait pipeline: {image_path.name} "
+                f"(stride={body.stride}, depth_model={body.depth_model})",
+            )
+
+            async def on_progress(msg: str, pct: float):
+                await manager.send_progress(project_id, "portrait", "processing", pct)
+                await manager.send_log(project_id, msg)
+
+            def sync_progress(msg: str, pct: float):
+                asyncio.run_coroutine_threadsafe(on_progress(msg, pct), _loop)
+
+            result = await _loop.run_in_executor(
+                None,
+                lambda: portrait_svc.run_portrait_pipeline(
+                    image_path,
+                    output_dir,
+                    stride=body.stride,
+                    focal_multiplier=body.focal_multiplier,
+                    num_novel_views=body.num_novel_views,
+                    include_background=body.include_background,
+                    depth_model=body.depth_model,
+                    on_progress=sync_progress,
+                ),
+            )
+
+            # Copy PLY to standard location if not already there
+            standard_ply = output_dir / "point_cloud.ply"
+            if not standard_ply.exists() and result.ply_path.exists():
+                shutil.copy2(result.ply_path, standard_ply)
+
+            # Generate LOD versions
+            try:
+                await _loop.run_in_executor(
+                    None, lod_svc.generate_lod, output_dir,
+                )
+            except Exception as lod_err:
+                logger.warning("LOD generation failed for portrait %s: %s",
+                               project_id, lod_err)
+
+            await _update_step(project_id, PipelineStep.TRAINING_COMPLETE)
+            await manager.send_status(project_id, "portrait", "completed")
+            await manager.broadcast(project_id, {
+                "type": "portrait_complete",
+                "num_gaussians": result.num_gaussians,
+                "novel_views": result.novel_view_count,
+            })
+            await manager.send_log(
+                project_id,
+                f"[INFO] Portrait pipeline complete: {result.num_gaussians} Gaussians, "
+                f"{result.novel_view_count} novel views",
+            )
+
+        except Exception as e:
+            logger.exception("Portrait pipeline failed for %s", project_id)
+            await _update_step(project_id, PipelineStep.FAILED, str(e))
+            await manager.send_status(project_id, "portrait", "failed", str(e))
+
+    asyncio.create_task(run())
+    return {"status": "started", "image": image_path.name}
+
+
+@router.get("/portrait/depth-preview")
+async def portrait_depth_preview(project_id: str):
+    """Serve the depth map preview image generated by the portrait pipeline."""
+    from fastapi.responses import FileResponse
+
+    proj = _project_dir(project_id)
+    depth_path = proj / "output" / "depth_preview.png"
+    if not depth_path.exists():
+        raise HTTPException(404, "Depth preview not available -- run portrait pipeline first")
+    return FileResponse(depth_path, media_type="image/png")

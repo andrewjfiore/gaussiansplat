@@ -17,6 +17,7 @@ from ..models import (
 from ..services.equirect import is_equirectangular
 from ..services.compress import ensure_ksplat
 from ..services.spz_export import ply_to_spz
+from ..services.lod import get_lod_info
 
 logger = logging.getLogger(__name__)
 
@@ -270,6 +271,49 @@ async def get_frame(project_id: str, filename: str):
     return FileResponse(path, media_type="image/jpeg")
 
 
+@router.get("/{project_id}/output/lod/info")
+async def lod_info(project_id: str):
+    """Return available LOD levels and their file sizes."""
+    output_dir = _project_dir(project_id) / "output"
+    if not output_dir.exists():
+        raise HTTPException(404, "Project output not found")
+    return get_lod_info(output_dir)
+
+
+@router.get("/{project_id}/output/lod/{level:int}")
+async def get_lod(project_id: str, level: int):
+    """Serve a specific LOD ply file."""
+    if level not in (0, 1, 2):
+        raise HTTPException(400, "LOD level must be 0, 1, or 2")
+
+    output_dir = _project_dir(project_id) / "output"
+    if not output_dir.exists():
+        raise HTTPException(404, "Project output not found")
+
+    if level == 2:
+        # Full quality - serve the original
+        ply_dir = output_dir / "ply"
+        ply_path = ply_dir / "point_cloud.ply"
+        if not ply_path.exists():
+            # Fallback: search for any PLY
+            plys = [p for p in output_dir.rglob("*.ply") if "_lod" not in p.stem]
+            if not plys:
+                raise HTTPException(404, "No PLY file found")
+            ply_path = plys[0]
+    else:
+        # LOD 0 or 1
+        ply_dir = output_dir / "ply"
+        ply_path = ply_dir / f"point_cloud_lod{level}.ply"
+        if not ply_path.exists():
+            # Also check output root
+            ply_path = output_dir / f"point_cloud_lod{level}.ply"
+
+    if not ply_path.exists():
+        raise HTTPException(404, f"LOD {level} file not found")
+
+    return FileResponse(ply_path, media_type="application/x-ply")
+
+
 @router.get("/{project_id}/output/{path:path}")
 async def get_output(project_id: str, path: str):
     file_path = _project_dir(project_id) / "output" / path
@@ -500,6 +544,40 @@ async def prune_reset(project_id: str):
     import shutil
     shutil.copy2(backup, ply_path)
     return {"status": "ok", "restored": True}
+
+
+@router.post("/{project_id}/upload-portrait")
+async def upload_portrait(project_id: str, file: UploadFile = File(...)):
+    """Upload a single portrait image for the portrait-to-Gaussian pipeline."""
+    proj_dir = _project_dir(project_id)
+    if not proj_dir.exists():
+        raise HTTPException(404, "Project not found")
+
+    # Validate file type
+    raw_name = file.filename or "portrait.jpg"
+    safe_name = raw_name.replace("\\", "/").split("/")[-1]
+    safe_name = "".join(c for c in safe_name if c.isalnum() or c in "._- ")
+    filename = safe_name.strip() or "portrait.jpg"
+    suffix = Path(filename).suffix.lower()
+    if suffix not in (".jpg", ".jpeg", ".png", ".webp"):
+        raise HTTPException(
+            400,
+            f"Unsupported image format '{suffix}'. Use .jpg, .png, or .webp.",
+        )
+
+    input_dir = proj_dir / "input"
+    input_dir.mkdir(exist_ok=True)
+    dest = input_dir / filename
+    with open(dest, "wb") as f:
+        while chunk := await file.read(1024 * 1024):
+            f.write(chunk)
+
+    file_size = dest.stat().st_size
+    logger.info(
+        "Portrait uploaded: project=%s file=%s size=%d bytes",
+        project_id, filename, file_size,
+    )
+    return {"filename": filename, "size": file_size}
 
 
 @router.get("/{project_id}/checkpoints")

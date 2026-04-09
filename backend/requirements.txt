@@ -6,11 +6,20 @@ httpx==0.28.1
 python-multipart==0.0.20
 websockets==14.2
 
-# Point cloud denoising (optional — gracefully skipped if missing)
+# Point cloud denoising (optional -- gracefully skipped if missing)
 open3d>=0.18.0
 
 # Equirectangular perspective crop extraction
 opencv-python-headless>=4.8.0
+
+# Cleanup / coverage / LOD analysis
+numpy>=1.24.0
+scipy>=1.11.0
+plyfile>=1.0
+
+# Portrait mode: monocular depth estimation
+transformers>=4.36.0
+Pillow>=10.0
 
 # Test dependencies
 pytest>=8.0.0

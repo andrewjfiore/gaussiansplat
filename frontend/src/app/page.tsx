@@ -24,6 +24,7 @@ export default function DashboardPage() {
   };
 
   const stepLink = (p: ProjectSummary) => {
+    if (p.step === "portrait_processing") return `/project/${p.id}/portrait`;
     if (p.step === "training_complete") return `/project/${p.id}/view`;
     if (p.step === "sfm_ready" || p.step === "training") return `/project/${p.id}/train`;
     if (p.step === "frames_ready" || p.step === "running_sfm") return `/project/${p.id}/sfm`;
