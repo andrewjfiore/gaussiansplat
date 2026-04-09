@@ -14,6 +14,7 @@ class PipelineStep(str, Enum):
     SFM_READY = "sfm_ready"
     TRAINING = "training"
     TRAINING_COMPLETE = "training_complete"
+    CLEANING = "cleaning"
     FAILED = "failed"
 
 
@@ -64,7 +65,7 @@ class ExtractSettings(BaseModel):
     filter_blur: bool = True
     min_blur_score: float = 50.0
     # Sharp-frame mode: extract denser candidates then keep sharpest frame per bucket.
-    # window=5 means 11 candidates per target frame (~±5 neighboring samples).
+    # window=5 means 11 candidates per target frame (~+-5 neighboring samples).
     sharp_frame_selection: bool = False
     sharp_window: int = 5
 
@@ -95,6 +96,7 @@ class SfmSettings(BaseModel):
 
 class TrainSettings(BaseModel):
     max_steps: int = 7000
+    # Main branch fields
     use_scaffold: bool = True
     voxel_size: float = 0.001
     denoise_strength: str = "off"  # off | light | medium | aggressive
@@ -104,6 +106,12 @@ class TrainSettings(BaseModel):
     temporal_mode: str = "static"  # "static" | "4d"
     temporal_smoothness: float = 0.01
     resume: bool = False
+    # Our branch fields
+    strategy: str = "default"
+    two_phase: bool = True
+    phase1_steps: Optional[int] = None  # auto-derived if None
+    phase2_steps: Optional[int] = None
+    densify_grad_thresh: Optional[float] = None
 
 
 class NovelViewSettings(BaseModel):
@@ -124,6 +132,38 @@ class RefineSettings(BaseModel):
     diffusion_guidance: float = 3.0
 
 
+class SceneStatsResponse(BaseModel):
+    num_points: int = 0
+    num_cameras: int = 0
+    num_images: int = 0
+    bbox_min: list[float] = [0.0, 0.0, 0.0]
+    bbox_max: list[float] = [0.0, 0.0, 0.0]
+    centroid: list[float] = [0.0, 0.0, 0.0]
+    scene_radius: float = 0.0
+    mean_point_density: float = 0.0
+    camera_baseline: float = 0.0
+
+
+class SceneConfigResponse(BaseModel):
+    max_steps: int = 7000
+    phase1_steps: int = 5600
+    phase2_steps: int = 1400
+    densify_grad_thresh: float = 0.0002
+    sh_degree: int = 3
+    scene_complexity: str = "medium"
+    reasoning: list[str] = []
+    stats: Optional[SceneStatsResponse] = None
+
+
+class CleanupSettings(BaseModel):
+    sor_k: int = 50
+    sor_std: float = 2.0
+    sparse_min_neighbors: int = 3
+    large_splat_percentile: float = 99.0
+    opacity_threshold: float = 0.05
+    bg_std_multiplier: float = 3.0
+
+
 class SystemDepStatus(BaseModel):
     name: str
     installed: bool
@@ -138,7 +178,7 @@ class SystemStatus(BaseModel):
     cuda_version: Optional[str] = None
     gpu_name: Optional[str] = None
     gpu_vram_mb: Optional[int] = None
-    # PyTorch CUDA — this is what actually matters for training
+    # PyTorch CUDA -- this is what actually matters for training
     torch_cuda_available: bool = False
     torch_cuda_version: Optional[str] = None
     ffmpeg: SystemDepStatus

@@ -90,7 +90,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify(opts || {}),
     }),
-  train: (id: string, opts?: import("@/lib/types").TrainSettings) =>
+  analyzeScene: (id: string) =>
+    request<import("@/lib/types").SceneConfig>(
+      `/api/projects/${id}/pipeline/scene-analysis`
+    ),
+  train: (id: string, opts?: Partial<import("@/lib/types").TrainSettings>) =>
     request<any>(`/api/projects/${id}/pipeline/train`, {
       method: "POST",
       body: JSON.stringify(opts || {}),
@@ -135,7 +139,7 @@ export const api = {
   listMasks: (id: string) =>
     request<{ name: string; url: string }[]>(`/api/projects/${id}/masks`),
 
-  // Post-processing
+  // Post-processing (pruning)
   prunePreview: (id: string, opts?: {
     min_opacity?: number; max_scale_mult?: number;
     position_percentile?: number; bbox?: string;
@@ -158,6 +162,29 @@ export const api = {
     }),
   pruneReset: (id: string) =>
     request<{ status: string }>(`/api/projects/${id}/prune-reset`, { method: "POST" }),
+
+  // Coverage
+  getCoverage: (id: string) =>
+    request<any>(`/api/projects/${id}/pipeline/coverage`),
+
+  // Cleanup
+  runCleanup: (id: string) =>
+    request<any>(`/api/projects/${id}/pipeline/cleanup`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    }),
+  getCleanupStats: (id: string) =>
+    request<any>(`/api/projects/${id}/pipeline/cleanup/stats`),
+  undoCleanup: (id: string) =>
+    request<any>(`/api/projects/${id}/pipeline/cleanup/undo`, {
+      method: "POST",
+    }),
+
+  // LOD
+  getLodInfo: (id: string) =>
+    request<LodInfo>(`/api/projects/${id}/output/lod/info`),
+  getLodUrl: (id: string, level: number) =>
+    `/api/projects/${id}/output/lod/${level}`,
 
   // Frames
   listFrames: (id: string) => request<any[]>(`/api/projects/${id}/frames`),
@@ -221,6 +248,19 @@ export const api = {
     }
   },
 };
+
+export interface LodLevelInfo {
+  level: number;
+  name: string;
+  filename: string;
+  size_bytes: number;
+  available: boolean;
+}
+
+export interface LodInfo {
+  levels: LodLevelInfo[];
+  has_lod: boolean;
+}
 
 export interface InstallProgress {
   phase: "downloading" | "extracting" | "complete" | "error";

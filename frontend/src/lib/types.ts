@@ -8,6 +8,7 @@ export type PipelineStep =
   | "sfm_ready"
   | "training"
   | "training_complete"
+  | "cleaning"
   | "failed";
 
 export interface ProjectSummary {
@@ -39,14 +40,21 @@ export interface ProjectDetail extends ProjectSummary {
   mask_count?: number;
 }
 
+// Merged TrainSettings: includes fields from both main and our branch
 export interface TrainSettings {
-  max_steps?: number;
+  max_steps: number;
+  // Main branch fields
   sh_degree?: number;
   enable_depth?: boolean;
   depth_weight?: number;
   temporal_mode?: "static" | "4d";
   temporal_smoothness?: number;
   resume?: boolean;
+  // Our branch fields
+  two_phase?: boolean;
+  phase1_steps?: number;
+  phase2_steps?: number;
+  densify_grad_thresh?: number;
 }
 
 export interface TemporalInfo {
@@ -109,6 +117,26 @@ export const STEP_ORDER: PipelineStep[] = [
   "training_complete",
 ];
 
+export interface CoverageGap {
+  direction: string;
+  score: number;
+  recommendation: string;
+}
+
+export interface CoverageGridEntry {
+  azimuth: number;
+  elevation: number;
+  score: number;
+  grid: number[][];
+}
+
+export interface CoverageResult {
+  overall_score: number;
+  direction_scores: Record<string, number>;
+  gaps: CoverageGap[];
+  grid_data: CoverageGridEntry[];
+}
+
 export const STEP_LABELS: Record<string, string> = {
   created: "Upload",
   extracting_frames: "Extracting Frames...",
@@ -119,5 +147,43 @@ export const STEP_LABELS: Record<string, string> = {
   sfm_ready: "SfM Ready",
   training: "Training...",
   training_complete: "Complete",
+  cleaning: "Cleaning Up...",
   failed: "Failed",
 };
+
+export interface SceneStats {
+  num_points: number;
+  num_cameras: number;
+  num_images: number;
+  bbox_min: number[];
+  bbox_max: number[];
+  centroid: number[];
+  scene_radius: number;
+  mean_point_density: number;
+  camera_baseline: number;
+}
+
+export interface SceneConfig {
+  max_steps: number;
+  phase1_steps: number;
+  phase2_steps: number;
+  densify_grad_thresh: number;
+  sh_degree: number;
+  scene_complexity: "low" | "medium" | "high";
+  reasoning: string[];
+  stats: SceneStats | null;
+}
+
+export interface CleanupFilterStats {
+  name: string;
+  removed: number;
+}
+
+export interface CleanupStats {
+  has_stats: boolean;
+  original_count?: number;
+  final_count?: number;
+  total_removed?: number;
+  removal_pct?: number;
+  filters?: CleanupFilterStats[];
+}

@@ -15,7 +15,8 @@ CREATE TABLE IF NOT EXISTS projects (
     sfm_points INTEGER DEFAULT 0,
     training_iterations INTEGER DEFAULT 0,
     has_output INTEGER DEFAULT 0,
-    error TEXT
+    error TEXT,
+    cleanup_stats TEXT
 );
 
 CREATE TABLE IF NOT EXISTS project_videos (
@@ -36,6 +37,7 @@ _DB_MIGRATIONS = [
     "ALTER TABLE projects ADD COLUMN temporal_mode TEXT DEFAULT 'static'",
     "ALTER TABLE projects ADD COLUMN mask_keywords TEXT",
     "ALTER TABLE projects ADD COLUMN mask_count INTEGER DEFAULT 0",
+    "ALTER TABLE projects ADD COLUMN cleanup_stats TEXT",
 ]
 
 

@@ -17,6 +17,7 @@ from ..models import (
 from ..services.equirect import is_equirectangular
 from ..services.compress import ensure_ksplat
 from ..services.spz_export import ply_to_spz
+from ..services.lod import get_lod_info
 
 logger = logging.getLogger(__name__)
 
@@ -268,6 +269,49 @@ async def get_frame(project_id: str, filename: str):
     if not path.exists():
         raise HTTPException(404)
     return FileResponse(path, media_type="image/jpeg")
+
+
+@router.get("/{project_id}/output/lod/info")
+async def lod_info(project_id: str):
+    """Return available LOD levels and their file sizes."""
+    output_dir = _project_dir(project_id) / "output"
+    if not output_dir.exists():
+        raise HTTPException(404, "Project output not found")
+    return get_lod_info(output_dir)
+
+
+@router.get("/{project_id}/output/lod/{level:int}")
+async def get_lod(project_id: str, level: int):
+    """Serve a specific LOD ply file."""
+    if level not in (0, 1, 2):
+        raise HTTPException(400, "LOD level must be 0, 1, or 2")
+
+    output_dir = _project_dir(project_id) / "output"
+    if not output_dir.exists():
+        raise HTTPException(404, "Project output not found")
+
+    if level == 2:
+        # Full quality - serve the original
+        ply_dir = output_dir / "ply"
+        ply_path = ply_dir / "point_cloud.ply"
+        if not ply_path.exists():
+            # Fallback: search for any PLY
+            plys = [p for p in output_dir.rglob("*.ply") if "_lod" not in p.stem]
+            if not plys:
+                raise HTTPException(404, "No PLY file found")
+            ply_path = plys[0]
+    else:
+        # LOD 0 or 1
+        ply_dir = output_dir / "ply"
+        ply_path = ply_dir / f"point_cloud_lod{level}.ply"
+        if not ply_path.exists():
+            # Also check output root
+            ply_path = output_dir / f"point_cloud_lod{level}.ply"
+
+    if not ply_path.exists():
+        raise HTTPException(404, f"LOD {level} file not found")
+
+    return FileResponse(ply_path, media_type="application/x-ply")
 
 
 @router.get("/{project_id}/output/{path:path}")
