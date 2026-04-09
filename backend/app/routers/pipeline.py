@@ -742,6 +742,7 @@ async def pipeline_health(project_id: str):
         PipelineStep.RUNNING_SFM.value,
         PipelineStep.TRAINING.value,
         PipelineStep.PORTRAIT.value,
+        PipelineStep.CLEANING.value,
     }
     stale = step in active_steps and not running
 
@@ -920,12 +921,13 @@ async def run_cleanup_endpoint(project_id: str, body: CleanupSettings | None = N
         raise HTTPException(404, "Project not found")
 
     output_dir = proj / "output"
-    ply_files = list(output_dir.rglob("*.ply"))
-    ply_files = [f for f in ply_files if f.stem != "point_cloud_original"]
-    if not ply_files:
-        raise HTTPException(400, "No training output (.ply) found")
-
-    ply_path = ply_files[0]
+    # Always target the canonical model, never LOD derivatives
+    ply_path = output_dir / "point_cloud.ply"
+    if not ply_path.exists():
+        # Fallback: check in ply/ subdirectory (portrait mode)
+        ply_path = output_dir / "ply" / "point_cloud.ply"
+    if not ply_path.exists():
+        raise HTTPException(400, "No training output (point_cloud.ply) found")
 
     async def run():
         loop = asyncio.get_event_loop()
@@ -1000,11 +1002,13 @@ async def undo_cleanup(project_id: str):
         raise HTTPException(404, "Project not found")
 
     output_dir = proj / "output"
-    backups = list(output_dir.rglob("point_cloud_original.ply"))
-    if not backups:
+    # Check canonical location first, then portrait subdirectory
+    backup_path = output_dir / "point_cloud_original.ply"
+    if not backup_path.exists():
+        backup_path = output_dir / "ply" / "point_cloud_original.ply"
+    if not backup_path.exists():
         raise HTTPException(400, "No cleanup backup found")
 
-    backup_path = backups[0]
     ply_path = backup_path.parent / "point_cloud.ply"
 
     shutil.copy2(backup_path, ply_path)

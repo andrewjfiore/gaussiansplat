@@ -114,7 +114,7 @@ export default function ViewPage() {
           });
           // Reload the viewer with cleaned model by cache-busting the URL
           setPlyUrl(
-            `/api/projects/${id}/output/ply/point_cloud.ply?t=${Date.now()}`
+            `/api/projects/${id}/output/point_cloud.ply?t=${Date.now()}`
           );
         } else if (msg.type === "status" && msg.step === "cleanup" && msg.state === "failed") {
           setCleanupRunning(false);
@@ -147,7 +147,7 @@ export default function ViewPage() {
       setCleanupStats(null);
       // Reload viewer with restored original
       setPlyUrl(
-        `/api/projects/${id}/output/ply/point_cloud.ply?t=${Date.now()}`
+        `/api/projects/${id}/output/point_cloud.ply?t=${Date.now()}`
       );
     } catch (err: any) {
       setCleanupError(err.message || "Failed to undo cleanup");
