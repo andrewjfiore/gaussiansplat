@@ -546,6 +546,40 @@ async def prune_reset(project_id: str):
     return {"status": "ok", "restored": True}
 
 
+@router.post("/{project_id}/upload-portrait")
+async def upload_portrait(project_id: str, file: UploadFile = File(...)):
+    """Upload a single portrait image for the portrait-to-Gaussian pipeline."""
+    proj_dir = _project_dir(project_id)
+    if not proj_dir.exists():
+        raise HTTPException(404, "Project not found")
+
+    # Validate file type
+    raw_name = file.filename or "portrait.jpg"
+    safe_name = raw_name.replace("\\", "/").split("/")[-1]
+    safe_name = "".join(c for c in safe_name if c.isalnum() or c in "._- ")
+    filename = safe_name.strip() or "portrait.jpg"
+    suffix = Path(filename).suffix.lower()
+    if suffix not in (".jpg", ".jpeg", ".png", ".webp"):
+        raise HTTPException(
+            400,
+            f"Unsupported image format '{suffix}'. Use .jpg, .png, or .webp.",
+        )
+
+    input_dir = proj_dir / "input"
+    input_dir.mkdir(exist_ok=True)
+    dest = input_dir / filename
+    with open(dest, "wb") as f:
+        while chunk := await file.read(1024 * 1024):
+            f.write(chunk)
+
+    file_size = dest.stat().st_size
+    logger.info(
+        "Portrait uploaded: project=%s file=%s size=%d bytes",
+        project_id, filename, file_size,
+    )
+    return {"filename": filename, "size": file_size}
+
+
 @router.get("/{project_id}/checkpoints")
 async def list_checkpoints(project_id: str):
     """List available training checkpoints for comparison."""

@@ -63,6 +63,54 @@ export const api = {
     });
   },
 
+  // Portrait upload
+  uploadPortrait: async (
+    id: string,
+    file: File,
+    onProgress?: (percent: number) => void
+  ) => {
+    return new Promise<any>((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", `/api/projects/${id}/upload-portrait`);
+
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable && onProgress) {
+          onProgress(Math.round((e.loaded / e.total) * 100));
+        }
+      };
+
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            resolve(JSON.parse(xhr.responseText));
+          } catch {
+            resolve({});
+          }
+        } else {
+          reject(new Error(`Upload failed: ${xhr.status} ${xhr.statusText}`));
+        }
+      };
+
+      xhr.onerror = () => reject(new Error("Upload failed: network error"));
+      xhr.ontimeout = () => reject(new Error("Upload failed: timeout"));
+      xhr.timeout = 300000; // 5 min timeout
+
+      const form = new FormData();
+      form.append("file", file);
+      xhr.send(form);
+    });
+  },
+
+  // Portrait pipeline
+  runPortrait: (id: string, opts?: import("@/lib/types").PortraitSettings) =>
+    request<any>(`/api/projects/${id}/pipeline/portrait`, {
+      method: "POST",
+      body: JSON.stringify(opts || {}),
+    }),
+
+  getDepthPreview: (id: string) =>
+    `/api/projects/${id}/portrait/depth-preview`,
+
   downloadSample: (id: string, sampleId: string) => {
     const form = new URLSearchParams();
     form.set("sample_id", sampleId);

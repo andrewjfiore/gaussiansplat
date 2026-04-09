@@ -12,6 +12,7 @@ from ..models import (
     PipelineStep, ExtractSettings, SfmSettings, TrainSettings,
     RefineSettings, MaskSettings, NovelViewSettings,
     CleanupSettings, SceneConfigResponse, SceneStatsResponse,
+    PortraitSettings,
 )
 from ..pipeline.task_runner import task_runner
 from ..services import ffmpeg as ffmpeg_svc
@@ -24,6 +25,7 @@ from ..services import masking as mask_svc
 from ..services.sfm_quality import evaluate_sfm_quality, export_sparse_ply
 from ..services import lod as lod_svc
 from ..services import coverage as coverage_svc
+from ..services import portrait as portrait_svc
 from ..services.scene_analysis import analyze_scene
 from ..services.cleanup import run_cleanup
 from ..ws.manager import manager
@@ -61,6 +63,10 @@ _STEP_PREREQUISITES: dict[str, set[PipelineStep]] = {
     },
     "extract-mesh": {PipelineStep.TRAINING_COMPLETE},
     "refine": {PipelineStep.TRAINING_COMPLETE},
+    "portrait": {
+        PipelineStep.CREATED, PipelineStep.FRAMES_READY,
+        PipelineStep.TRAINING_COMPLETE, PipelineStep.FAILED,
+    },
 }
 
 
@@ -735,6 +741,7 @@ async def pipeline_health(project_id: str):
         PipelineStep.MASKING.value,
         PipelineStep.RUNNING_SFM.value,
         PipelineStep.TRAINING.value,
+        PipelineStep.PORTRAIT.value,
     }
     stale = step in active_steps and not running
 
@@ -1037,3 +1044,123 @@ async def get_coverage(project_id: str):
         ],
         "grid_data": result.grid_data,
     }
+
+
+# ---------------------------------------------------------------------------
+# Portrait Mode endpoints
+# ---------------------------------------------------------------------------
+
+
+def _find_portrait_image(proj: Path) -> Path | None:
+    """Find a portrait image in the project's input/ directory."""
+    input_dir = proj / "input"
+    if not input_dir.exists():
+        return None
+    for ext in ("*.jpg", "*.jpeg", "*.png", "*.webp"):
+        imgs = sorted(input_dir.glob(ext))
+        if imgs:
+            return imgs[0]
+    # Fallback: check frames directory for an extracted frame
+    frames_dir = proj / "frames"
+    if frames_dir.exists():
+        jpgs = sorted(frames_dir.glob("*.jpg"))
+        if jpgs:
+            return jpgs[0]
+    return None
+
+
+@router.post("/portrait")
+async def run_portrait(project_id: str, body: PortraitSettings | None = None):
+    """Run the portrait-to-Gaussian pipeline on a single portrait image."""
+    body = body or PortraitSettings()
+    await _check_precondition(project_id, "portrait")
+
+    proj = _project_dir(project_id)
+    image_path = _find_portrait_image(proj)
+    if image_path is None:
+        raise HTTPException(
+            400,
+            "No portrait image found. Upload a portrait image first "
+            "(POST /api/projects/{id}/upload-portrait).",
+        )
+
+    output_dir = proj / "output"
+    _loop = asyncio.get_event_loop()
+
+    async def run():
+        try:
+            await _update_step(project_id, PipelineStep.PORTRAIT)
+            await manager.send_status(project_id, "portrait", "running")
+            await manager.send_log(
+                project_id,
+                f"[INFO] Starting portrait pipeline: {image_path.name} "
+                f"(stride={body.stride}, depth_model={body.depth_model})",
+            )
+
+            async def on_progress(msg: str, pct: float):
+                await manager.send_progress(project_id, "portrait", "processing", pct)
+                await manager.send_log(project_id, msg)
+
+            def sync_progress(msg: str, pct: float):
+                asyncio.run_coroutine_threadsafe(on_progress(msg, pct), _loop)
+
+            result = await _loop.run_in_executor(
+                None,
+                lambda: portrait_svc.run_portrait_pipeline(
+                    image_path,
+                    output_dir,
+                    stride=body.stride,
+                    focal_multiplier=body.focal_multiplier,
+                    num_novel_views=body.num_novel_views,
+                    include_background=body.include_background,
+                    depth_model=body.depth_model,
+                    on_progress=sync_progress,
+                ),
+            )
+
+            # Copy PLY to standard location if not already there
+            standard_ply = output_dir / "point_cloud.ply"
+            if not standard_ply.exists() and result.ply_path.exists():
+                shutil.copy2(result.ply_path, standard_ply)
+
+            # Generate LOD versions
+            try:
+                await _loop.run_in_executor(
+                    None, lod_svc.generate_lod, output_dir,
+                )
+            except Exception as lod_err:
+                logger.warning("LOD generation failed for portrait %s: %s",
+                               project_id, lod_err)
+
+            await _update_step(project_id, PipelineStep.TRAINING_COMPLETE)
+            await manager.send_status(project_id, "portrait", "completed")
+            await manager.broadcast(project_id, {
+                "type": "portrait_complete",
+                "num_gaussians": result.num_gaussians,
+                "novel_views": result.novel_view_count,
+            })
+            await manager.send_log(
+                project_id,
+                f"[INFO] Portrait pipeline complete: {result.num_gaussians} Gaussians, "
+                f"{result.novel_view_count} novel views",
+            )
+
+        except Exception as e:
+            logger.exception("Portrait pipeline failed for %s", project_id)
+            await _update_step(project_id, PipelineStep.FAILED, str(e))
+            await manager.send_status(project_id, "portrait", "failed", str(e))
+
+    asyncio.create_task(run())
+    return {"status": "started", "image": image_path.name}
+
+
+@router.get("/portrait/depth-preview")
+async def portrait_depth_preview(project_id: str):
+    """Serve the depth map preview image generated by the portrait pipeline."""
+    from fastapi.responses import FileResponse
+
+    proj = _project_dir(project_id)
+    depth_path = proj / "output" / "depth_preview.png"
+    if not depth_path.exists():
+        raise HTTPException(404, "Depth preview not available -- run portrait pipeline first")
+    return FileResponse(depth_path, media_type="image/png")

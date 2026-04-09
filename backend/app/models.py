@@ -15,6 +15,7 @@ class PipelineStep(str, Enum):
     TRAINING = "training"
     TRAINING_COMPLETE = "training_complete"
     CLEANING = "cleaning"
+    PORTRAIT = "portrait_processing"
     FAILED = "failed"
 
 
@@ -162,6 +163,14 @@ class CleanupSettings(BaseModel):
     large_splat_percentile: float = 99.0
     opacity_threshold: float = 0.05
     bg_std_multiplier: float = 3.0
+
+
+class PortraitSettings(BaseModel):
+    stride: int = 2                      # pixel stride for downsampling Gaussians
+    focal_multiplier: float = 0.8        # focal_length = image_width * this
+    num_novel_views: int = 6             # synthetic novel views to generate
+    include_background: bool = False     # include background at lower opacity
+    depth_model: str = "small"           # "small" (~100MB) or "base" (~400MB)
 
 
 class SystemDepStatus(BaseModel):

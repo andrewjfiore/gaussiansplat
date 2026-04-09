@@ -9,6 +9,7 @@ export type PipelineStep =
   | "training"
   | "training_complete"
   | "cleaning"
+  | "portrait_processing"
   | "failed";
 
 export interface ProjectSummary {
@@ -107,6 +108,7 @@ export interface FrameInfo {
 
 export const STEP_ORDER: PipelineStep[] = [
   "created",
+  "portrait_processing",
   "extracting_frames",
   "frames_ready",
   "masking",
@@ -148,6 +150,7 @@ export const STEP_LABELS: Record<string, string> = {
   training: "Training...",
   training_complete: "Complete",
   cleaning: "Cleaning Up...",
+  portrait_processing: "Portrait Processing...",
   failed: "Failed",
 };
 
@@ -177,6 +180,13 @@ export interface SceneConfig {
 export interface CleanupFilterStats {
   name: string;
   removed: number;
+}
+
+export interface PortraitSettings {
+  stride?: number;
+  focal_multiplier?: number;
+  num_novel_views?: number;
+  include_background?: boolean;
 }
 
 export interface CleanupStats {
