@@ -10,6 +10,8 @@ export type PipelineStep =
   | "training_complete"
   | "cleaning"
   | "portrait_processing"
+  | "panorama_processing"
+  | "fewview_processing"
   | "failed";
 
 export interface ProjectSummary {
@@ -109,6 +111,8 @@ export interface FrameInfo {
 export const STEP_ORDER: PipelineStep[] = [
   "created",
   "portrait_processing",
+  "panorama_processing",
+  "fewview_processing",
   "extracting_frames",
   "frames_ready",
   "masking",
@@ -151,6 +155,8 @@ export const STEP_LABELS: Record<string, string> = {
   training_complete: "Complete",
   cleaning: "Cleaning Up...",
   portrait_processing: "Portrait Processing...",
+  panorama_processing: "Panorama Processing...",
+  fewview_processing: "Few-View Processing...",
   failed: "Failed",
 };
 
@@ -187,6 +193,12 @@ export interface PortraitSettings {
   focal_multiplier?: number;
   num_novel_views?: number;
   include_background?: boolean;
+}
+
+export interface PanoramaSettings {
+  stride?: number;
+  sky_mode?: "skip" | "low_opacity" | "keep";
+  depth_mode?: "single" | "cubemap";
 }
 
 export interface AugmentSettings {
@@ -271,4 +283,33 @@ export interface QuickPreviewComplete {
   num_gaussians: number;
   source_frame: string;
   processing_time: number;
+}
+
+// Neural Refine types
+export interface NeuralRefineSettings {
+  num_steps?: number;
+  learning_rate?: number;
+  hidden_dim?: number;
+}
+
+export interface NeuralRefineStats {
+  has_stats: boolean;
+  original_color_variance?: number;
+  refined_color_variance?: number;
+  num_gaussians_updated?: number;
+  training_loss_history?: number[];
+  final_loss?: number;
+}
+
+// Few-View types
+export interface FewViewSettings {
+  arrangement?: "turntable" | "forward" | "free";
+  merge_resolution?: number;
+  fill_gaps?: boolean;
+}
+
+export interface FewViewImage {
+  name: string;
+  url: string;
+  size: number;
 }

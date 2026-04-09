@@ -15,6 +15,14 @@ export default function ProjectLayout({ children }: { children: React.ReactNode 
     pathname?.includes("/portrait") ||
     project?.step === "portrait_processing";
 
+  const isPanorama =
+    pathname?.includes("/panorama") ||
+    project?.step === "panorama_processing";
+
+  const isFewView =
+    pathname?.includes("/fewview") ||
+    project?.step === "fewview_processing";
+
   useEffect(() => {
     api.getProject(id).then(setProject).catch(() => {});
     const interval = setInterval(() => {
@@ -27,7 +35,7 @@ export default function ProjectLayout({ children }: { children: React.ReactNode 
     <div>
       <div className="mb-4">
         <h1 className="text-2xl font-bold">{project?.name || "Loading..."}</h1>
-        {project && <StepIndicator currentStep={project.step} isPortrait={isPortrait} />}
+        {project && <StepIndicator currentStep={project.step} isPortrait={isPortrait} isPanorama={isPanorama} isFewView={isFewView} />}
         {project?.error && (
           <div className="text-red-400 text-sm bg-red-900/20 border border-red-800 rounded-lg p-3 mt-2">
             {project.error}

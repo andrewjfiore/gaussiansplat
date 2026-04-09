@@ -39,6 +39,7 @@ _DB_MIGRATIONS = [
     "ALTER TABLE projects ADD COLUMN mask_count INTEGER DEFAULT 0",
     "ALTER TABLE projects ADD COLUMN cleanup_stats TEXT",
     "ALTER TABLE projects ADD COLUMN holefill_stats TEXT",
+    "ALTER TABLE projects ADD COLUMN neural_refine_stats TEXT",
 ]
 
 

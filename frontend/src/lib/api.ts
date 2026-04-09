@@ -111,6 +111,105 @@ export const api = {
   getDepthPreview: (id: string) =>
     `/api/projects/${id}/portrait/depth-preview`,
 
+  // Panorama upload
+  uploadPanorama: async (
+    id: string,
+    file: File,
+    onProgress?: (percent: number) => void
+  ) => {
+    return new Promise<any>((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", `/api/projects/${id}/upload-panorama`);
+
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable && onProgress) {
+          onProgress(Math.round((e.loaded / e.total) * 100));
+        }
+      };
+
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            resolve(JSON.parse(xhr.responseText));
+          } catch {
+            resolve({});
+          }
+        } else {
+          reject(new Error(`Upload failed: ${xhr.status} ${xhr.statusText}`));
+        }
+      };
+
+      xhr.onerror = () => reject(new Error("Upload failed: network error"));
+      xhr.ontimeout = () => reject(new Error("Upload failed: timeout"));
+      xhr.timeout = 300000; // 5 min timeout
+
+      const form = new FormData();
+      form.append("file", file);
+      xhr.send(form);
+    });
+  },
+
+  // Panorama pipeline
+  runPanorama: (id: string, opts?: import("@/lib/types").PanoramaSettings) =>
+    request<any>(`/api/projects/${id}/pipeline/panorama`, {
+      method: "POST",
+      body: JSON.stringify(opts || {}),
+    }),
+
+  getPanoramaDepthPreview: (id: string) =>
+    `/api/projects/${id}/pipeline/panorama/depth-preview`,
+
+  // Few-View upload and pipeline
+  uploadFewView: async (
+    id: string,
+    files: File[],
+    onProgress?: (percent: number) => void
+  ) => {
+    return new Promise<any>((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", `/api/projects/${id}/upload-fewview`);
+
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable && onProgress) {
+          onProgress(Math.round((e.loaded / e.total) * 100));
+        }
+      };
+
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            resolve(JSON.parse(xhr.responseText));
+          } catch {
+            resolve({});
+          }
+        } else {
+          reject(new Error(`Upload failed: ${xhr.status} ${xhr.statusText}`));
+        }
+      };
+
+      xhr.onerror = () => reject(new Error("Upload failed: network error"));
+      xhr.ontimeout = () => reject(new Error("Upload failed: timeout"));
+      xhr.timeout = 300000; // 5 min timeout
+
+      const form = new FormData();
+      for (const file of files) {
+        form.append("files", file);
+      }
+      xhr.send(form);
+    });
+  },
+
+  runFewView: (id: string, opts?: import("@/lib/types").FewViewSettings) =>
+    request<any>(`/api/projects/${id}/pipeline/fewview`, {
+      method: "POST",
+      body: JSON.stringify(opts || {}),
+    }),
+
+  listFewViewImages: (id: string) =>
+    request<import("@/lib/types").FewViewImage[]>(
+      `/api/projects/${id}/fewview-images`
+    ),
+
   downloadSample: (id: string, sampleId: string) => {
     const form = new URLSearchParams();
     form.set("sample_id", sampleId);
@@ -255,6 +354,21 @@ export const api = {
     ),
   undoHolefill: (id: string) =>
     request<any>(`/api/projects/${id}/pipeline/holefill/undo`, {
+      method: "POST",
+    }),
+
+  // Neural Refine
+  runNeuralRefine: (id: string, opts?: import("@/lib/types").NeuralRefineSettings) =>
+    request<any>(`/api/projects/${id}/pipeline/neural-refine`, {
+      method: "POST",
+      body: JSON.stringify(opts || {}),
+    }),
+  getNeuralRefineStats: (id: string) =>
+    request<import("@/lib/types").NeuralRefineStats>(
+      `/api/projects/${id}/pipeline/neural-refine/stats`
+    ),
+  undoNeuralRefine: (id: string) =>
+    request<any>(`/api/projects/${id}/pipeline/neural-refine/undo`, {
       method: "POST",
     }),
 

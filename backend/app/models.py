@@ -16,6 +16,8 @@ class PipelineStep(str, Enum):
     TRAINING_COMPLETE = "training_complete"
     CLEANING = "cleaning"
     PORTRAIT = "portrait_processing"
+    PANORAMA = "panorama_processing"
+    FEWVIEW = "fewview_processing"
     FAILED = "failed"
 
 
@@ -172,6 +174,12 @@ class HolefillSettings(BaseModel):
     fill_density: float = 1.0            # fill density multiplier (0.5-2.0)
 
 
+class NeuralRefineSettings(BaseModel):
+    num_steps: int = 500
+    learning_rate: float = 0.001
+    hidden_dim: int = 64
+
+
 class AugmentSettings(BaseModel):
     num_views_per_frame: int = 2
     angle_range: float = 15.0
@@ -184,6 +192,19 @@ class PortraitSettings(BaseModel):
     num_novel_views: int = 6             # synthetic novel views to generate
     include_background: bool = False     # include background at lower opacity
     depth_model: str = "small"           # "small" (~100MB) or "base" (~400MB)
+
+
+class FewViewSettings(BaseModel):
+    arrangement: str = "turntable"       # "turntable" | "forward" | "free"
+    merge_resolution: float = 0.01       # voxel size for merging duplicate points
+    fill_gaps: bool = True               # fill gaps between views
+
+
+class PanoramaSettings(BaseModel):
+    stride: int = 2                      # pixel stride for downsampling (1-4)
+    sky_mode: str = "skip"               # "skip" | "low_opacity" | "keep"
+    depth_mode: str = "single"           # "single" | "cubemap"
+    depth_model: str = "small"           # "small" or "base"
 
 
 class SystemDepStatus(BaseModel):

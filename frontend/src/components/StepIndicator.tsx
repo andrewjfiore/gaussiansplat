@@ -15,6 +15,18 @@ const PORTRAIT_STEPS = [
   { key: "view", label: "View" },
 ] as const;
 
+const PANORAMA_STEPS = [
+  { key: "upload", label: "Upload" },
+  { key: "process", label: "Process" },
+  { key: "view", label: "View" },
+] as const;
+
+const FEWVIEW_STEPS = [
+  { key: "upload", label: "Upload" },
+  { key: "reconstruct", label: "Reconstruct" },
+  { key: "view", label: "View" },
+] as const;
+
 const STEP_PROGRESS: Record<string, number> = {
   created: 0,
   extracting_frames: 0,
@@ -33,7 +45,115 @@ const PORTRAIT_STEP_PROGRESS: Record<string, number> = {
   failed: -1,
 };
 
-export function StepIndicator({ currentStep, isPortrait = false }: { currentStep: PipelineStep; isPortrait?: boolean }) {
+const PANORAMA_STEP_PROGRESS: Record<string, number> = {
+  created: 0,
+  panorama_processing: 1,
+  training_complete: 2,
+  failed: -1,
+};
+
+const FEWVIEW_STEP_PROGRESS: Record<string, number> = {
+  created: 0,
+  fewview_processing: 1,
+  training_complete: 2,
+  failed: -1,
+};
+
+export function StepIndicator({ currentStep, isPortrait = false, isPanorama = false, isFewView = false }: { currentStep: PipelineStep; isPortrait?: boolean; isPanorama?: boolean; isFewView?: boolean }) {
+  if (isFewView) {
+    const progress = FEWVIEW_STEP_PROGRESS[currentStep] ?? 0;
+    const isRunning = currentStep === "fewview_processing";
+
+    return (
+      <div className="flex items-center gap-2 py-4">
+        {FEWVIEW_STEPS.map((s, i) => {
+          const done = progress > i;
+          const active = progress === i;
+          const running = active && isRunning;
+
+          return (
+            <div key={s.key} className="flex items-center gap-2">
+              <div
+                className={`flex items-center justify-center w-8 h-8 rounded-full text-sm font-medium border-2 transition-colors ${
+                  done
+                    ? "bg-green-500 border-green-500 text-white"
+                    : active
+                    ? "border-emerald-500 text-emerald-500 bg-emerald-50"
+                    : "border-gray-300 text-gray-400"
+                }`}
+              >
+                {done ? (
+                  <Check className="w-4 h-4" />
+                ) : running ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  i + 1
+                )}
+              </div>
+              <span
+                className={`text-sm ${
+                  done ? "text-green-600" : active ? "text-emerald-600 font-medium" : "text-gray-400"
+                }`}
+              >
+                {s.label}
+              </span>
+              {i < FEWVIEW_STEPS.length - 1 && (
+                <div className={`w-8 h-0.5 ${done ? "bg-green-500" : "bg-gray-200"}`} />
+              )}
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+
+  if (isPanorama) {
+    const progress = PANORAMA_STEP_PROGRESS[currentStep] ?? 0;
+    const isRunning = currentStep === "panorama_processing";
+
+    return (
+      <div className="flex items-center gap-2 py-4">
+        {PANORAMA_STEPS.map((s, i) => {
+          const done = progress > i;
+          const active = progress === i;
+          const running = active && isRunning;
+
+          return (
+            <div key={s.key} className="flex items-center gap-2">
+              <div
+                className={`flex items-center justify-center w-8 h-8 rounded-full text-sm font-medium border-2 transition-colors ${
+                  done
+                    ? "bg-green-500 border-green-500 text-white"
+                    : active
+                    ? "border-teal-500 text-teal-500 bg-teal-50"
+                    : "border-gray-300 text-gray-400"
+                }`}
+              >
+                {done ? (
+                  <Check className="w-4 h-4" />
+                ) : running ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  i + 1
+                )}
+              </div>
+              <span
+                className={`text-sm ${
+                  done ? "text-green-600" : active ? "text-teal-600 font-medium" : "text-gray-400"
+                }`}
+              >
+                {s.label}
+              </span>
+              {i < PANORAMA_STEPS.length - 1 && (
+                <div className={`w-8 h-0.5 ${done ? "bg-green-500" : "bg-gray-200"}`} />
+              )}
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+
   if (isPortrait) {
     const progress = PORTRAIT_STEP_PROGRESS[currentStep] ?? 0;
     const isRunning = currentStep === "portrait_processing";

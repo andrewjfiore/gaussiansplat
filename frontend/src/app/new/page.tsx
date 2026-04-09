@@ -2,7 +2,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
-import { Upload, Download, Loader2, Camera, Video } from "lucide-react";
+import { Upload, Download, Loader2, Camera, Video, Globe, Images } from "lucide-react";
 
 const SAMPLES = [
   {
@@ -31,11 +31,15 @@ const SAMPLES = [
 export default function NewProjectPage() {
   const router = useRouter();
   const [name, setName] = useState("");
-  const [mode, setMode] = useState<"video" | "portrait">("video");
+  const [mode, setMode] = useState<"video" | "portrait" | "panorama" | "fewview">("video");
   const [tab, setTab] = useState<"upload" | "sample">("upload");
   const [files, setFiles] = useState<File[]>([]);
   const [portraitFile, setPortraitFile] = useState<File | null>(null);
   const [portraitPreview, setPortraitPreview] = useState<string | null>(null);
+  const [panoramaFile, setPanoramaFile] = useState<File | null>(null);
+  const [panoramaPreview, setPanoramaPreview] = useState<string | null>(null);
+  const [fewviewFiles, setFewviewFiles] = useState<File[]>([]);
+  const [fewviewPreviews, setFewviewPreviews] = useState<string[]>([]);
   const [selectedSample, setSelectedSample] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -59,6 +63,14 @@ export default function NewProjectPage() {
       setError("Please select a portrait image");
       return;
     }
+    if (mode === "panorama" && !panoramaFile) {
+      setError("Please select a panoramic image");
+      return;
+    }
+    if (mode === "fewview" && fewviewFiles.length < 2) {
+      setError("Please select at least 2 images");
+      return;
+    }
 
     setCreating(true);
     setError(null);
@@ -74,6 +86,24 @@ export default function NewProjectPage() {
           setUploadPercent(pct);
         });
         router.push(`/project/${project.id}/portrait`);
+        return;
+      }
+
+      if (mode === "panorama" && panoramaFile) {
+        setStatusText("Uploading panorama...");
+        await api.uploadPanorama(project.id, panoramaFile, (pct) => {
+          setUploadPercent(pct);
+        });
+        router.push(`/project/${project.id}/panorama`);
+        return;
+      }
+
+      if (mode === "fewview" && fewviewFiles.length >= 2) {
+        setStatusText("Uploading images...");
+        await api.uploadFewView(project.id, fewviewFiles, (pct) => {
+          setUploadPercent(pct);
+        });
+        router.push(`/project/${project.id}/fewview`);
         return;
       }
 
@@ -143,6 +173,28 @@ export default function NewProjectPage() {
             >
               <Camera className="w-4 h-4" />
               Portrait Mode
+            </button>
+            <button
+              onClick={() => setMode("panorama")}
+              className={`flex-1 px-4 py-3 rounded-lg text-sm font-medium transition border-2 flex items-center justify-center gap-2 ${
+                mode === "panorama"
+                  ? "bg-teal-600/10 border-teal-500 text-teal-400"
+                  : "bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-600 hover:text-white"
+              }`}
+            >
+              <Globe className="w-4 h-4" />
+              Panorama Mode
+            </button>
+            <button
+              onClick={() => setMode("fewview")}
+              className={`flex-1 px-4 py-3 rounded-lg text-sm font-medium transition border-2 flex items-center justify-center gap-2 ${
+                mode === "fewview"
+                  ? "bg-emerald-600/10 border-emerald-500 text-emerald-400"
+                  : "bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-600 hover:text-white"
+              }`}
+            >
+              <Images className="w-4 h-4" />
+              Few-View
             </button>
           </div>
         </div>
@@ -342,6 +394,147 @@ export default function NewProjectPage() {
               </div>
             </div>
           )}
+
+          {mode === "panorama" && (
+            <div>
+              <div
+                className="border-2 border-dashed border-gray-700 rounded-lg p-8 text-center hover:border-teal-500/50 transition cursor-pointer"
+                onClick={() =>
+                  document.getElementById("panorama-input")?.click()
+                }
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  const dropped = Array.from(e.dataTransfer.files).find((f) =>
+                    f.type.startsWith("image/")
+                  );
+                  if (dropped) {
+                    setPanoramaFile(dropped);
+                    setPanoramaPreview(URL.createObjectURL(dropped));
+                  }
+                }}
+              >
+                <input
+                  id="panorama-input"
+                  type="file"
+                  accept=".jpg,.jpeg,.png,.webp,.hdr"
+                  className="hidden"
+                  onChange={(e) => {
+                    const selected = e.target.files?.[0];
+                    if (selected) {
+                      setPanoramaFile(selected);
+                      if (selected.type.startsWith("image/")) {
+                        setPanoramaPreview(URL.createObjectURL(selected));
+                      }
+                    }
+                  }}
+                />
+                {panoramaPreview ? (
+                  <div className="space-y-2">
+                    <img
+                      src={panoramaPreview}
+                      alt="Panorama preview"
+                      className="max-h-40 w-full mx-auto rounded-lg object-contain"
+                    />
+                    <p className="text-white font-medium">
+                      {panoramaFile?.name}
+                    </p>
+                    <p className="text-gray-500 text-sm">
+                      {panoramaFile
+                        ? `${(panoramaFile.size / 1024 / 1024).toFixed(1)} MB`
+                        : ""}
+                      {" -- "}Click or drop to change
+                    </p>
+                  </div>
+                ) : (
+                  <div>
+                    <Globe className="w-10 h-10 text-teal-500/60 mx-auto mb-3" />
+                    <p className="text-gray-400">
+                      Drag & drop a 360 panoramic image or click to browse
+                    </p>
+                    <p className="text-gray-500 text-sm mt-1">
+                      .jpg, .png, .webp, .hdr -- equirectangular 2:1 ratio
+                    </p>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {mode === "fewview" && (
+            <div>
+              <div
+                className="border-2 border-dashed border-gray-700 rounded-lg p-8 text-center hover:border-emerald-500/50 transition cursor-pointer"
+                onClick={() =>
+                  document.getElementById("fewview-input")?.click()
+                }
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  const dropped = Array.from(e.dataTransfer.files).filter((f) =>
+                    f.type.startsWith("image/")
+                  );
+                  if (dropped.length > 0) {
+                    const combined = [...fewviewFiles, ...dropped].slice(0, 8);
+                    setFewviewFiles(combined);
+                    setFewviewPreviews(
+                      combined.map((f) => URL.createObjectURL(f))
+                    );
+                  }
+                }}
+              >
+                <input
+                  id="fewview-input"
+                  type="file"
+                  accept=".jpg,.jpeg,.png,.webp"
+                  multiple
+                  className="hidden"
+                  onChange={(e) => {
+                    const selected = Array.from(e.target.files || []);
+                    if (selected.length > 0) {
+                      const combined = [...fewviewFiles, ...selected].slice(0, 8);
+                      setFewviewFiles(combined);
+                      setFewviewPreviews(
+                        combined.map((f) => URL.createObjectURL(f))
+                      );
+                    }
+                  }}
+                />
+                {fewviewFiles.length > 0 ? (
+                  <div className="space-y-3">
+                    <div className="grid grid-cols-4 gap-2 max-w-sm mx-auto">
+                      {fewviewPreviews.map((url, i) => (
+                        <div key={i} className="aspect-square rounded-lg overflow-hidden border border-gray-600">
+                          <img
+                            src={url}
+                            alt={`Photo ${i + 1}`}
+                            className="w-full h-full object-cover"
+                          />
+                        </div>
+                      ))}
+                    </div>
+                    <p className="text-white font-medium">
+                      {fewviewFiles.length} image{fewviewFiles.length !== 1 ? "s" : ""} selected
+                    </p>
+                    <p className="text-gray-500 text-sm">
+                      {fewviewFiles.length < 2 ? "Need at least 2 -- " : ""}
+                      Click or drop to add more (max 8)
+                    </p>
+                  </div>
+                ) : (
+                  <div>
+                    <Images className="w-10 h-10 text-emerald-500/60 mx-auto mb-3" />
+                    <p className="text-gray-400">
+                      Drag & drop 2-8 photos or click to browse
+                    </p>
+                    <p className="text-gray-500 text-sm mt-1">
+                      .jpg, .png, .webp -- photos from different angles
+                    </p>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </div>
 
         {error && (
@@ -354,9 +547,13 @@ export default function NewProjectPage() {
           onClick={handleCreate}
           disabled={creating}
           className={`w-full disabled:bg-gray-700 disabled:text-gray-400 text-white py-3 rounded-lg font-medium transition flex items-center justify-center gap-2 ${
-            mode === "portrait"
-              ? "bg-violet-600 hover:bg-violet-700"
-              : "bg-blue-600 hover:bg-blue-700"
+            mode === "fewview"
+              ? "bg-emerald-600 hover:bg-emerald-700"
+              : mode === "panorama"
+                ? "bg-teal-600 hover:bg-teal-700"
+                : mode === "portrait"
+                  ? "bg-violet-600 hover:bg-violet-700"
+                  : "bg-blue-600 hover:bg-blue-700"
           }`}
         >
           {creating ? (
@@ -364,6 +561,10 @@ export default function NewProjectPage() {
               <Loader2 className="w-4 h-4 animate-spin" />{" "}
               {statusText || "Creating..."}
             </>
+          ) : mode === "fewview" ? (
+            "Create Few-View Project"
+          ) : mode === "panorama" ? (
+            "Create Panorama Project"
           ) : mode === "portrait" ? (
             "Create Portrait Project"
           ) : (

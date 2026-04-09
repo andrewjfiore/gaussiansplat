@@ -8,7 +8,7 @@ import TemporalViewer from "@/components/TemporalViewer";
 import { CoveragePanel } from "@/components/CoveragePanel";
 import { AOVPanel } from "@/components/AOVPanel";
 import { QRCodeSVG } from "qrcode.react";
-import type { ProjectDetail, TemporalInfo, CleanupStats, HolefillStats } from "@/lib/types";
+import type { ProjectDetail, TemporalInfo, CleanupStats, HolefillStats, NeuralRefineStats } from "@/lib/types";
 
 type ViewMode = "orbit" | "fps";
 
@@ -40,6 +40,14 @@ export default function ViewPage() {
   const [showHolefillSettings, setShowHolefillSettings] = useState(false);
   const [holefillDensity, setHolefillDensity] = useState(1.0);
   const [holefillResolution, setHolefillResolution] = useState(64);
+
+  // Neural Refine state
+  const [refineRunning, setRefineRunning] = useState(false);
+  const [refineStats, setRefineStats] = useState<NeuralRefineStats | null>(null);
+  const [refineError, setRefineError] = useState<string | null>(null);
+  const [showRefineSettings, setShowRefineSettings] = useState(false);
+  const [refineSteps, setRefineSteps] = useState(500);
+  const [refineLr, setRefineLr] = useState(0.001);
 
   useEffect(() => {
     api.getProject(id).then((p) => {
@@ -104,6 +112,15 @@ export default function ViewPage() {
     api.getHolefillStats(id).then((stats) => {
       if (stats.has_stats) {
         setHolefillStats(stats);
+      }
+    }).catch(() => {
+      // No stats yet -- that's fine
+    });
+
+    // Fetch existing neural refine stats
+    api.getNeuralRefineStats(id).then((stats) => {
+      if (stats.has_stats) {
+        setRefineStats(stats);
       }
     }).catch(() => {
       // No stats yet -- that's fine
@@ -238,6 +255,73 @@ export default function ViewPage() {
       );
     } catch (err: any) {
       setHolefillError(err.message || "Failed to undo hole fill");
+    }
+  }, [id]);
+
+  // Listen for neural refine completion via WebSocket
+  useEffect(() => {
+    if (!refineRunning) return;
+
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const wsUrl = `${protocol}//${window.location.host}/ws/projects/${id}/logs`;
+    const ws = new WebSocket(wsUrl);
+
+    ws.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        if (msg.type === "neural_refine_complete") {
+          setRefineRunning(false);
+          setShowRefineSettings(false);
+          setRefineStats({
+            has_stats: true,
+            original_color_variance: msg.original_color_variance,
+            refined_color_variance: msg.refined_color_variance,
+            num_gaussians_updated: msg.num_gaussians_updated,
+            training_loss_history: msg.training_loss_history,
+            final_loss: msg.final_loss,
+          });
+          // Reload the viewer with refined model
+          setPlyUrl(
+            `/api/projects/${id}/output/point_cloud.ply?t=${Date.now()}`
+          );
+        } else if (msg.type === "status" && msg.step === "neural_refine" && msg.state === "failed") {
+          setRefineRunning(false);
+          setRefineError(msg.error || "Neural refinement failed");
+        }
+      } catch {
+        // ignore parse errors
+      }
+    };
+
+    return () => {
+      ws.close();
+    };
+  }, [refineRunning, id]);
+
+  const handleNeuralRefine = useCallback(async () => {
+    setRefineRunning(true);
+    setRefineError(null);
+    try {
+      await api.runNeuralRefine(id, {
+        num_steps: refineSteps,
+        learning_rate: refineLr,
+      });
+    } catch (err: any) {
+      setRefineRunning(false);
+      setRefineError(err.message || "Failed to start neural refinement");
+    }
+  }, [id, refineSteps, refineLr]);
+
+  const handleUndoRefine = useCallback(async () => {
+    try {
+      await api.undoNeuralRefine(id);
+      setRefineStats(null);
+      // Reload viewer with restored original
+      setPlyUrl(
+        `/api/projects/${id}/output/point_cloud.ply?t=${Date.now()}`
+      );
+    } catch (err: any) {
+      setRefineError(err.message || "Failed to undo neural refinement");
     }
   }, [id]);
 
@@ -405,6 +489,102 @@ export default function ViewPage() {
             </button>
           )}
 
+          {/* Neural Refine button */}
+          {!refineStats && (
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setShowRefineSettings((v) => !v)}
+                disabled={refineRunning}
+                className={
+                  "px-3 py-1.5 text-sm rounded-lg border transition-colors " +
+                  (refineRunning
+                    ? "bg-gray-700 border-gray-600 text-gray-400 cursor-not-allowed"
+                    : showRefineSettings
+                    ? "bg-amber-600 border-amber-500 text-white"
+                    : "bg-amber-700 border-amber-600 text-white hover:bg-amber-600")
+                }
+              >
+                {refineRunning ? (
+                  <span className="flex items-center gap-2">
+                    <span className="animate-spin w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full inline-block" />
+                    Refining...
+                  </span>
+                ) : (
+                  "Neural Refine"
+                )}
+              </button>
+
+              {/* Settings popover */}
+              {showRefineSettings && !refineRunning && (
+                <div className="absolute right-0 top-full mt-2 w-72 bg-gray-900 border border-gray-700 rounded-lg shadow-xl p-4 z-50">
+                  <div className="space-y-3">
+                    <p className="text-xs text-gray-400">
+                      Train a small neural network to refine per-Gaussian colors using periodic activations.
+                    </p>
+
+                    <div>
+                      <label className="block text-xs text-gray-400 mb-1">
+                        Training Steps: {refineSteps}
+                      </label>
+                      <input
+                        type="range"
+                        min="100"
+                        max="2000"
+                        step="100"
+                        value={refineSteps}
+                        onChange={(e) => setRefineSteps(parseInt(e.target.value))}
+                        className="w-full accent-amber-500"
+                      />
+                      <div className="flex justify-between text-[10px] text-gray-500">
+                        <span>100 (Fast)</span>
+                        <span>2000 (Thorough)</span>
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs text-gray-400 mb-1">
+                        Learning Rate: {refineLr.toFixed(4)}
+                      </label>
+                      <input
+                        type="range"
+                        min="0.0001"
+                        max="0.01"
+                        step="0.0001"
+                        value={refineLr}
+                        onChange={(e) => setRefineLr(parseFloat(e.target.value))}
+                        className="w-full accent-amber-500"
+                      />
+                      <div className="flex justify-between text-[10px] text-gray-500">
+                        <span>Conservative</span>
+                        <span>Aggressive</span>
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={handleNeuralRefine}
+                      className="w-full px-3 py-1.5 text-sm rounded-lg bg-amber-600 border border-amber-500 text-white hover:bg-amber-500 transition-colors"
+                    >
+                      Refine Colors
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Undo Neural Refine button (shown after refinement) */}
+          {refineStats && (
+            <button
+              type="button"
+              onClick={handleUndoRefine}
+              className="px-3 py-1.5 text-sm rounded-lg border bg-gray-800 border-gray-700 text-gray-300 hover:bg-gray-700 hover:text-white transition-colors"
+            >
+              Undo Refine
+            </button>
+          )}
+
           {/* Coverage toggle */}
           <button
             type="button"
@@ -554,6 +734,40 @@ export default function ViewPage() {
       {holefillError && (
         <div className="rounded-lg border border-red-800 bg-red-950/50 p-3">
           <p className="text-sm text-red-400">{holefillError}</p>
+        </div>
+      )}
+
+      {/* Neural Refine stats banner */}
+      {refineStats && refineStats.has_stats && (
+        <div className="rounded-lg border border-amber-800 bg-amber-950/50 p-3">
+          <div className="flex items-start justify-between">
+            <div>
+              <p className="text-sm font-medium text-amber-400">
+                Neural Refinement Complete
+              </p>
+              <p className="text-sm text-amber-300/80 mt-0.5">
+                Refined{" "}
+                <span className="font-semibold text-amber-300">
+                  {refineStats.num_gaussians_updated?.toLocaleString()}
+                </span>{" "}
+                Gaussians, final loss:{" "}
+                <span className="font-semibold text-amber-300">
+                  {refineStats.final_loss?.toFixed(6)}
+                </span>
+              </p>
+              <p className="text-xs text-amber-400/60 mt-1">
+                Color variance: {refineStats.original_color_variance?.toFixed(4)} &rarr;{" "}
+                {refineStats.refined_color_variance?.toFixed(4)}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Neural Refine error banner */}
+      {refineError && (
+        <div className="rounded-lg border border-red-800 bg-red-950/50 p-3">
+          <p className="text-sm text-red-400">{refineError}</p>
         </div>
       )}
 

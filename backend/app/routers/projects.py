@@ -588,6 +588,123 @@ async def upload_portrait(project_id: str, file: UploadFile = File(...)):
     return {"filename": filename, "size": file_size}
 
 
+@router.post("/{project_id}/upload-panorama")
+async def upload_panorama(project_id: str, file: UploadFile = File(...)):
+    """Upload an equirectangular panoramic image for the panorama-to-Gaussian pipeline."""
+    proj_dir = _project_dir(project_id)
+    if not proj_dir.exists():
+        raise HTTPException(404, "Project not found")
+
+    # Validate file type
+    raw_name = file.filename or "panorama.jpg"
+    safe_name = raw_name.replace("\\", "/").split("/")[-1]
+    safe_name = "".join(c for c in safe_name if c.isalnum() or c in "._- ")
+    filename = safe_name.strip() or "panorama.jpg"
+    suffix = Path(filename).suffix.lower()
+    if suffix not in (".jpg", ".jpeg", ".png", ".webp", ".hdr"):
+        raise HTTPException(
+            400,
+            f"Unsupported image format '{suffix}'. Use .jpg, .png, .webp, or .hdr.",
+        )
+
+    input_dir = proj_dir / "input"
+    input_dir.mkdir(exist_ok=True)
+    dest = input_dir / filename
+    with open(dest, "wb") as f:
+        while chunk := await file.read(1024 * 1024):
+            f.write(chunk)
+
+    file_size = dest.stat().st_size
+    logger.info(
+        "Panorama uploaded: project=%s file=%s size=%d bytes",
+        project_id, filename, file_size,
+    )
+    return {"filename": filename, "size": file_size}
+
+
+@router.post("/{project_id}/upload-fewview")
+async def upload_fewview(project_id: str, files: list[UploadFile] = File(...)):
+    """Upload multiple images for the few-view reconstruction pipeline."""
+    proj_dir = _project_dir(project_id)
+    if not proj_dir.exists():
+        raise HTTPException(404, "Project not found")
+
+    if len(files) < 2:
+        raise HTTPException(400, "At least 2 images are required")
+    if len(files) > 8:
+        raise HTTPException(400, "Maximum 8 images supported")
+
+    fewview_dir = proj_dir / "input" / "fewview"
+    fewview_dir.mkdir(parents=True, exist_ok=True)
+
+    uploaded = []
+    for i, file in enumerate(files):
+        raw_name = file.filename or f"image_{i:02d}.jpg"
+        safe_name = raw_name.replace("\\", "/").split("/")[-1]
+        safe_name = "".join(c for c in safe_name if c.isalnum() or c in "._- ")
+        filename = safe_name.strip() or f"image_{i:02d}.jpg"
+        suffix = Path(filename).suffix.lower()
+        if suffix not in (".jpg", ".jpeg", ".png", ".webp"):
+            raise HTTPException(
+                400,
+                f"Unsupported image format '{suffix}' for file '{raw_name}'. "
+                "Use .jpg, .png, or .webp.",
+            )
+
+        dest = fewview_dir / f"fv_{i:02d}{suffix}"
+        with open(dest, "wb") as f:
+            while chunk := await file.read(1024 * 1024):
+                f.write(chunk)
+
+        uploaded.append({
+            "filename": dest.name,
+            "original_name": filename,
+            "size": dest.stat().st_size,
+        })
+
+    total_size = sum(u["size"] for u in uploaded)
+    logger.info(
+        "Few-view images uploaded: project=%s count=%d total_size=%d bytes",
+        project_id, len(uploaded), total_size,
+    )
+    return {"count": len(uploaded), "files": uploaded, "total_size": total_size}
+
+
+@router.get("/{project_id}/fewview-images")
+async def list_fewview_images(project_id: str):
+    """List uploaded few-view images for preview."""
+    fewview_dir = _project_dir(project_id) / "input" / "fewview"
+    if not fewview_dir.exists():
+        return []
+
+    images = sorted([
+        f for f in fewview_dir.iterdir()
+        if f.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp")
+    ])
+    return [
+        {
+            "name": img.name,
+            "url": f"/api/projects/{project_id}/fewview-images/{img.name}",
+            "size": img.stat().st_size,
+        }
+        for img in images
+    ]
+
+
+@router.get("/{project_id}/fewview-images/{filename}")
+async def get_fewview_image(project_id: str, filename: str):
+    """Serve a few-view input image."""
+    path = _project_dir(project_id) / "input" / "fewview" / filename
+    if not path.exists():
+        raise HTTPException(404)
+    suffix = path.suffix.lower()
+    media = {
+        ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+        ".png": "image/png", ".webp": "image/webp",
+    }.get(suffix, "application/octet-stream")
+    return FileResponse(path, media_type=media)
+
+
 @router.get("/{project_id}/checkpoints")
 async def list_checkpoints(project_id: str):
     """List available training checkpoints for comparison."""

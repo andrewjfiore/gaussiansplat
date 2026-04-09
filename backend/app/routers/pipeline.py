@@ -12,7 +12,8 @@ from ..models import (
     PipelineStep, ExtractSettings, SfmSettings, TrainSettings,
     RefineSettings, MaskSettings, NovelViewSettings,
     CleanupSettings, HolefillSettings, SceneConfigResponse, SceneStatsResponse,
-    PortraitSettings, AugmentSettings,
+    PortraitSettings, PanoramaSettings, FewViewSettings, AugmentSettings,
+    NeuralRefineSettings,
 )
 from ..pipeline.task_runner import task_runner
 from ..services import ffmpeg as ffmpeg_svc
@@ -27,11 +28,14 @@ from ..services import lod as lod_svc
 from ..services import coverage as coverage_svc
 from ..services import aov as aov_svc
 from ..services import portrait as portrait_svc
+from ..services import panorama as panorama_svc
+from ..services import fewview as fewview_svc
 from ..services import novel_views as novel_views_svc
 from ..services import quick_preview as quick_preview_svc
 from ..services.scene_analysis import analyze_scene
 from ..services.cleanup import run_cleanup
 from ..services.holefill import run_holefill
+from ..services import neural_refine as neural_refine_svc
 from ..ws.manager import manager
 
 logger = logging.getLogger(__name__)
@@ -68,6 +72,14 @@ _STEP_PREREQUISITES: dict[str, set[PipelineStep]] = {
     "extract-mesh": {PipelineStep.TRAINING_COMPLETE},
     "refine": {PipelineStep.TRAINING_COMPLETE},
     "portrait": {
+        PipelineStep.CREATED, PipelineStep.FRAMES_READY,
+        PipelineStep.TRAINING_COMPLETE, PipelineStep.FAILED,
+    },
+    "panorama": {
+        PipelineStep.CREATED, PipelineStep.FRAMES_READY,
+        PipelineStep.TRAINING_COMPLETE, PipelineStep.FAILED,
+    },
+    "fewview": {
         PipelineStep.CREATED, PipelineStep.FRAMES_READY,
         PipelineStep.TRAINING_COMPLETE, PipelineStep.FAILED,
     },
@@ -843,6 +855,8 @@ async def pipeline_health(project_id: str):
         PipelineStep.RUNNING_SFM.value,
         PipelineStep.TRAINING.value,
         PipelineStep.PORTRAIT.value,
+        PipelineStep.PANORAMA.value,
+        PipelineStep.FEWVIEW.value,
         PipelineStep.CLEANING.value,
     }
     stale = step in active_steps and not running
@@ -1234,6 +1248,112 @@ async def undo_holefill(project_id: str):
     return {"status": "restored"}
 
 
+# ---------------------------------------------------------------------------
+# Neural Color Refinement endpoints
+# ---------------------------------------------------------------------------
+
+
+@router.post("/neural-refine")
+async def run_neural_refine_endpoint(project_id: str, body: NeuralRefineSettings | None = None):
+    body = body or NeuralRefineSettings()
+    proj = _project_dir(project_id)
+    if not proj.exists():
+        raise HTTPException(404, "Project not found")
+
+    output_dir = proj / "output"
+    ply_path = output_dir / "point_cloud.ply"
+    if not ply_path.exists():
+        ply_path = output_dir / "ply" / "point_cloud.ply"
+    if not ply_path.exists():
+        raise HTTPException(400, "No training output (point_cloud.ply) found")
+
+    async def run():
+        loop = asyncio.get_event_loop()
+        try:
+            await manager.send_status(project_id, "neural_refine", "running")
+
+            async def on_progress(msg: str, pct: float):
+                await manager.send_progress(project_id, "neural_refine", "refining", pct)
+                await manager.send_log(project_id, msg)
+
+            def sync_progress(msg: str, pct: float):
+                asyncio.run_coroutine_threadsafe(on_progress(msg, pct), loop)
+
+            stats = await loop.run_in_executor(
+                None,
+                lambda: neural_refine_svc.run_neural_refine(
+                    proj,
+                    num_steps=body.num_steps,
+                    learning_rate=body.learning_rate,
+                    hidden_dim=body.hidden_dim,
+                    on_progress=sync_progress,
+                ),
+            )
+
+            # Store stats in DB
+            stats_json = json.dumps(stats.to_dict())
+            async with db_session() as db_nr:
+                await db_nr.execute(
+                    "UPDATE projects SET neural_refine_stats = ? WHERE id = ?",
+                    (stats_json, project_id),
+                )
+
+            await manager.send_status(project_id, "neural_refine", "completed")
+            await manager.broadcast(project_id, {
+                "type": "neural_refine_complete",
+                **stats.to_dict(),
+            })
+
+        except Exception as e:
+            logger.exception("Neural refinement failed for %s", project_id)
+            await manager.send_status(project_id, "neural_refine", "failed", str(e))
+
+    asyncio.create_task(run())
+    return {"status": "started"}
+
+
+@router.get("/neural-refine/stats")
+async def get_neural_refine_stats(project_id: str):
+    async with db_session() as db:
+        cursor = await db.execute(
+            "SELECT neural_refine_stats FROM projects WHERE id = ?", (project_id,)
+        )
+        row = await cursor.fetchone()
+        if not row:
+            raise HTTPException(404, "Project not found")
+        raw = row["neural_refine_stats"]
+        if not raw:
+            return {"has_stats": False}
+        return {"has_stats": True, **json.loads(raw)}
+
+
+@router.post("/neural-refine/undo")
+async def undo_neural_refine(project_id: str):
+    proj = _project_dir(project_id)
+    if not proj.exists():
+        raise HTTPException(404, "Project not found")
+
+    output_dir = proj / "output"
+    backup_path = output_dir / "point_cloud_pre_refine.ply"
+    if not backup_path.exists():
+        backup_path = output_dir / "ply" / "point_cloud_pre_refine.ply"
+    if not backup_path.exists():
+        raise HTTPException(400, "No neural refine backup found")
+
+    ply_path = backup_path.parent / "point_cloud.ply"
+
+    shutil.copy2(backup_path, ply_path)
+    backup_path.unlink()
+
+    async with db_session() as db:
+        await db.execute(
+            "UPDATE projects SET neural_refine_stats = NULL WHERE id = ?", (project_id,)
+        )
+
+    logger.info("Neural refine undone for project %s", project_id)
+    return {"status": "restored"}
+
+
 @router.get("/coverage")
 async def get_coverage(project_id: str):
     proj = _project_dir(project_id)
@@ -1444,6 +1564,218 @@ async def portrait_depth_preview(project_id: str):
     if not depth_path.exists():
         raise HTTPException(404, "Depth preview not available -- run portrait pipeline first")
     return FileResponse(depth_path, media_type="image/png")
+
+
+# ---------------------------------------------------------------------------
+# Panorama Mode endpoints
+# ---------------------------------------------------------------------------
+
+
+def _find_panorama_image(proj: Path) -> Path | None:
+    """Find a panorama image in the project's input/ directory."""
+    input_dir = proj / "input"
+    if not input_dir.exists():
+        return None
+    for ext in ("*.jpg", "*.jpeg", "*.png", "*.webp", "*.hdr"):
+        imgs = sorted(input_dir.glob(ext))
+        if imgs:
+            return imgs[0]
+    return None
+
+
+@router.post("/panorama")
+async def run_panorama(project_id: str, body: PanoramaSettings | None = None):
+    """Run the panorama-to-Gaussian pipeline on an equirectangular image."""
+    body = body or PanoramaSettings()
+    await _check_precondition(project_id, "panorama")
+
+    proj = _project_dir(project_id)
+    image_path = _find_panorama_image(proj)
+    if image_path is None:
+        raise HTTPException(
+            400,
+            "No panorama image found. Upload a panorama image first "
+            "(POST /api/projects/{id}/upload-panorama).",
+        )
+
+    output_dir = proj / "output"
+    _loop = asyncio.get_event_loop()
+
+    async def run():
+        try:
+            await _update_step(project_id, PipelineStep.PANORAMA)
+            await manager.send_status(project_id, "panorama", "running")
+            await manager.send_log(
+                project_id,
+                f"[INFO] Starting panorama pipeline: {image_path.name} "
+                f"(stride={body.stride}, sky_mode={body.sky_mode})",
+            )
+
+            async def on_progress(msg: str, pct: float):
+                await manager.send_progress(project_id, "panorama", "processing", pct)
+                await manager.send_log(project_id, msg)
+
+            def sync_progress(msg: str, pct: float):
+                asyncio.run_coroutine_threadsafe(on_progress(msg, pct), _loop)
+
+            result = await _loop.run_in_executor(
+                None,
+                lambda: panorama_svc.run_panorama_pipeline(
+                    image_path,
+                    output_dir,
+                    stride=body.stride,
+                    sky_mode=body.sky_mode,
+                    depth_mode=body.depth_mode,
+                    depth_model=body.depth_model,
+                    on_progress=sync_progress,
+                ),
+            )
+
+            # Copy PLY to standard location if not already there
+            standard_ply = output_dir / "point_cloud.ply"
+            if not standard_ply.exists() and result.ply_path.exists():
+                shutil.copy2(result.ply_path, standard_ply)
+
+            # Generate LOD versions
+            try:
+                await _loop.run_in_executor(
+                    None, lod_svc.generate_lod, output_dir,
+                )
+            except Exception as lod_err:
+                logger.warning("LOD generation failed for panorama %s: %s",
+                               project_id, lod_err)
+
+            await _update_step(project_id, PipelineStep.TRAINING_COMPLETE)
+            await manager.send_status(project_id, "panorama", "completed")
+            await manager.broadcast(project_id, {
+                "type": "panorama_complete",
+                "num_gaussians": result.num_gaussians,
+                "sky_removed": result.sky_removed,
+            })
+            await manager.send_log(
+                project_id,
+                f"[INFO] Panorama pipeline complete: {result.num_gaussians} Gaussians, "
+                f"{result.sky_removed} sky pixels removed",
+            )
+
+        except Exception as e:
+            logger.exception("Panorama pipeline failed for %s", project_id)
+            await _update_step(project_id, PipelineStep.FAILED, str(e))
+            await manager.send_status(project_id, "panorama", "failed", str(e))
+
+    asyncio.create_task(run())
+    return {"status": "started", "image": image_path.name}
+
+
+@router.get("/panorama/depth-preview")
+async def panorama_depth_preview(project_id: str):
+    """Serve the depth map preview image generated by the panorama pipeline."""
+    from fastapi.responses import FileResponse
+
+    proj = _project_dir(project_id)
+    depth_path = proj / "output" / "depth_preview.png"
+    if not depth_path.exists():
+        raise HTTPException(404, "Depth preview not available -- run panorama pipeline first")
+    return FileResponse(depth_path, media_type="image/png")
+
+
+# ---------------------------------------------------------------------------
+# Few-View Mode endpoints
+# ---------------------------------------------------------------------------
+
+
+@router.post("/fewview")
+async def run_fewview(project_id: str, body: FewViewSettings | None = None):
+    """Run the few-view reconstruction pipeline on multiple uploaded images."""
+    body = body or FewViewSettings()
+    await _check_precondition(project_id, "fewview")
+
+    proj = _project_dir(project_id)
+    fewview_dir = proj / "input" / "fewview"
+    if not fewview_dir.exists() or not any(
+        f for f in fewview_dir.iterdir()
+        if f.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp")
+    ):
+        raise HTTPException(
+            400,
+            "No few-view images found. Upload images first "
+            "(POST /api/projects/{id}/upload-fewview).",
+        )
+
+    # Collect image paths
+    image_paths = sorted([
+        f for f in fewview_dir.iterdir()
+        if f.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp")
+    ])
+    if len(image_paths) < 2:
+        raise HTTPException(400, "At least 2 images are required for few-view reconstruction")
+    if len(image_paths) > 8:
+        image_paths = image_paths[:8]
+
+    output_dir = proj / "output"
+    _loop = asyncio.get_event_loop()
+
+    async def run():
+        try:
+            await _update_step(project_id, PipelineStep.FEWVIEW)
+            await manager.send_status(project_id, "fewview", "running")
+            await manager.send_log(
+                project_id,
+                f"[INFO] Starting few-view pipeline: {len(image_paths)} images "
+                f"(arrangement={body.arrangement}, merge_resolution={body.merge_resolution})",
+            )
+
+            async def on_progress(msg: str, pct: float):
+                await manager.send_progress(project_id, "fewview", msg, pct)
+                await manager.send_log(project_id, msg)
+
+            def sync_progress(msg: str, pct: float):
+                asyncio.run_coroutine_threadsafe(on_progress(msg, pct), _loop)
+
+            result = await _loop.run_in_executor(
+                None,
+                lambda: fewview_svc.run_fewview_pipeline(
+                    image_paths=image_paths,
+                    output_dir=output_dir,
+                    arrangement=body.arrangement,
+                    merge_resolution=body.merge_resolution,
+                    fill_gaps=body.fill_gaps,
+                    on_progress=sync_progress,
+                ),
+            )
+
+            # Generate LOD versions
+            try:
+                await _loop.run_in_executor(
+                    None, lod_svc.generate_lod, output_dir,
+                )
+            except Exception as lod_err:
+                logger.warning("LOD generation failed for fewview %s: %s",
+                               project_id, lod_err)
+
+            await _update_step(project_id, PipelineStep.TRAINING_COMPLETE)
+            await manager.send_status(project_id, "fewview", "completed")
+            await manager.broadcast(project_id, {
+                "type": "fewview_complete",
+                "num_gaussians": result.num_gaussians,
+                "num_images_used": result.num_images_used,
+                "num_merged_points": result.num_merged_points,
+                "num_fill_points": result.num_fill_points,
+            })
+            await manager.send_log(
+                project_id,
+                f"[INFO] Few-view pipeline complete: {result.num_gaussians} Gaussians "
+                f"from {result.num_images_used} images, "
+                f"{result.num_merged_points} merged, {result.num_fill_points} fill",
+            )
+
+        except Exception as e:
+            logger.exception("Few-view pipeline failed for %s", project_id)
+            await _update_step(project_id, PipelineStep.FAILED, str(e))
+            await manager.send_status(project_id, "fewview", "failed", str(e))
+
+    asyncio.create_task(run())
+    return {"status": "started", "num_images": len(image_paths)}
 
 
 # ---------------------------------------------------------------------------
