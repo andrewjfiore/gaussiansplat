@@ -211,6 +211,21 @@ export const api = {
   pruneReset: (id: string) =>
     request<{ status: string }>(`/api/projects/${id}/prune-reset`, { method: "POST" }),
 
+  // View Augmentation
+  augmentViews: (id: string, opts?: Partial<import("@/lib/types").AugmentSettings>) =>
+    request<{ status: string }>(`/api/projects/${id}/pipeline/augment-views`, {
+      method: "POST",
+      body: JSON.stringify(opts || {}),
+    }),
+  listSyntheticViews: (id: string) =>
+    request<import("@/lib/types").SyntheticViewList>(
+      `/api/projects/${id}/pipeline/augment-views/list`
+    ),
+  clearSyntheticViews: (id: string) =>
+    request<{ status: string }>(`/api/projects/${id}/pipeline/augment-views/clear`, {
+      method: "POST",
+    }),
+
   // Coverage
   getCoverage: (id: string) =>
     request<any>(`/api/projects/${id}/pipeline/coverage`),
@@ -227,6 +242,43 @@ export const api = {
     request<any>(`/api/projects/${id}/pipeline/cleanup/undo`, {
       method: "POST",
     }),
+
+  // Hole-fill
+  runHolefill: (id: string, opts?: import("@/lib/types").HolefillSettings) =>
+    request<any>(`/api/projects/${id}/pipeline/holefill`, {
+      method: "POST",
+      body: JSON.stringify(opts || {}),
+    }),
+  getHolefillStats: (id: string) =>
+    request<import("@/lib/types").HolefillStats>(
+      `/api/projects/${id}/pipeline/holefill/stats`
+    ),
+  undoHolefill: (id: string) =>
+    request<any>(`/api/projects/${id}/pipeline/holefill/undo`, {
+      method: "POST",
+    }),
+
+  // AOV
+  generateAov: (id: string) =>
+    request<{ status: string }>(`/api/projects/${id}/pipeline/aov`, {
+      method: "POST",
+    }),
+  getAovImages: (id: string) =>
+    request<import("@/lib/types").AOVResult>(
+      `/api/projects/${id}/pipeline/aov/images`
+    ),
+
+  // Quick Preview
+  generateQuickPreview: (id: string) =>
+    request<{ status: string }>(`/api/projects/${id}/pipeline/quick-preview`, {
+      method: "POST",
+    }),
+  getQuickPreviewStatus: (id: string) =>
+    request<import("@/lib/types").QuickPreviewStatus>(
+      `/api/projects/${id}/pipeline/quick-preview/status`
+    ),
+  getQuickPreviewUrl: (id: string) =>
+    `/api/projects/${id}/output/preview_point_cloud.ply`,
 
   // LOD
   getLodInfo: (id: string) =>

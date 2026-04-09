@@ -165,6 +165,19 @@ class CleanupSettings(BaseModel):
     bg_std_multiplier: float = 3.0
 
 
+class HolefillSettings(BaseModel):
+    grid_resolution: int = 64            # occupancy grid resolution (32/64/128)
+    min_hole_size: int = 2               # min voxels for a hole cluster
+    max_hole_size: int = 500             # max voxels for a hole cluster
+    fill_density: float = 1.0            # fill density multiplier (0.5-2.0)
+
+
+class AugmentSettings(BaseModel):
+    num_views_per_frame: int = 2
+    angle_range: float = 15.0
+    max_source_frames: int = 10
+
+
 class PortraitSettings(BaseModel):
     stride: int = 2                      # pixel stride for downsampling Gaussians
     focal_multiplier: float = 0.8        # focal_length = image_width * this

@@ -1,13 +1,14 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { api } from "@/lib/api";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { useElapsedTimer } from "@/hooks/useElapsedTimer";
 import { LogStream } from "@/components/LogStream";
 import { FrameGrid } from "@/components/FrameGrid";
-import type { FrameInfo, ProjectDetail } from "@/lib/types";
-import { Play, ArrowRight, ArrowLeft, Loader2, XCircle, RotateCcw, Clock, Settings2, Volume2, VolumeX, Scissors, Eye } from "lucide-react";
+import { SplatViewer } from "@/components/SplatViewer";
+import type { FrameInfo, ProjectDetail, QuickPreviewStatus, QuickPreviewComplete } from "@/lib/types";
+import { Play, ArrowRight, ArrowLeft, Loader2, XCircle, RotateCcw, Clock, Settings2, Volume2, VolumeX, Scissors, Eye, Sparkles, Maximize2 } from "lucide-react";
 import { useCompletionChime } from "@/hooks/useCompletionChime";
 
 const FPS_OPTIONS = [
@@ -39,6 +40,11 @@ export default function FramesPage() {
   const [maskInvert, setMaskInvert] = useState(false);
   const [showMaskSettings, setShowMaskSettings] = useState(false);
   const [maskPreviews, setMaskPreviews] = useState<{ name: string; url: string }[]>([]);
+
+  // Quick preview state
+  const [previewStatus, setPreviewStatus] = useState<QuickPreviewStatus | null>(null);
+  const [previewGenerating, setPreviewGenerating] = useState(false);
+  const [previewResult, setPreviewResult] = useState<QuickPreviewComplete | null>(null);
 
   useEffect(() => { onStepChange(project?.step); }, [project?.step, onStepChange]);
 
@@ -84,6 +90,38 @@ export default function FramesPage() {
       api.listMasks(id).then(setMaskPreviews).catch(() => {});
     }
   }, [id, masksReady]);
+
+  // Check for existing quick preview when frames are ready
+  useEffect(() => {
+    if (framesReady) {
+      api.getQuickPreviewStatus(id).then(setPreviewStatus).catch(() => {});
+    }
+  }, [id, framesReady]);
+
+  // Listen for quick_preview completion via WebSocket status updates
+  useEffect(() => {
+    if (!previewGenerating) return;
+    if (
+      status?.step === "quick_preview" &&
+      (status?.state === "completed" || status?.state === "failed")
+    ) {
+      setPreviewGenerating(false);
+      if (status.state === "completed") {
+        api.getQuickPreviewStatus(id).then(setPreviewStatus).catch(() => {});
+      }
+    }
+  }, [status, previewGenerating, id]);
+
+  const handleQuickPreview = useCallback(async () => {
+    setPreviewGenerating(true);
+    setPreviewResult(null);
+    try {
+      await api.generateQuickPreview(id);
+    } catch (err: any) {
+      alert(err.message);
+      setPreviewGenerating(false);
+    }
+  }, [id]);
 
   const handleExtract = async () => {
     setStarting(true);
@@ -304,6 +342,83 @@ export default function FramesPage() {
                     className="w-24 h-16 object-cover rounded border border-gray-600"
                   />
                 ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Quick 3D Preview */}
+      {framesReady && !isBusy && (
+        <div className="bg-gray-800 rounded-lg border border-gray-700 overflow-hidden">
+          <div className="p-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Sparkles className="w-5 h-5 text-amber-400" />
+                <h3 className="text-sm font-medium text-white">Quick 3D Preview</h3>
+                {previewStatus?.exists && !previewGenerating && (
+                  <span className="text-xs bg-green-500/20 text-green-400 px-1.5 py-0.5 rounded">
+                    Ready
+                  </span>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                {previewStatus?.exists && (
+                  <button
+                    onClick={() => router.push(`/project/${id}/view`)}
+                    className="text-xs text-gray-400 hover:text-white flex items-center gap-1 transition"
+                  >
+                    <Maximize2 className="w-3 h-3" /> Full Screen
+                  </button>
+                )}
+                {!previewGenerating && (
+                  <button
+                    onClick={handleQuickPreview}
+                    disabled={previewGenerating}
+                    className="bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 disabled:from-gray-600 disabled:to-gray-600 text-white text-sm px-4 py-1.5 rounded-lg flex items-center gap-2 transition font-medium shadow-lg shadow-amber-500/20"
+                  >
+                    <Sparkles className="w-4 h-4" />
+                    {previewStatus?.exists ? "Regenerate" : "Quick 3D Preview"}
+                  </button>
+                )}
+                {previewGenerating && (
+                  <div className="flex items-center gap-2 text-sm text-amber-400">
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    Generating preview...
+                  </div>
+                )}
+              </div>
+            </div>
+            {!previewStatus?.exists && !previewGenerating && (
+              <p className="text-xs text-gray-500 mt-2">
+                Generate an instant rough 3D preview from a single frame while the full pipeline runs.
+              </p>
+            )}
+          </div>
+
+          {/* Inline SplatViewer for preview */}
+          {previewStatus?.exists && !previewGenerating && (
+            <div>
+              <div className="h-[400px] border-t border-gray-700">
+                <SplatViewer
+                  plyUrl={api.getQuickPreviewUrl(id)}
+                  projectId={id}
+                />
+              </div>
+              <div className="px-4 py-2 bg-gray-900/50 border-t border-gray-700 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <span className="text-xs text-amber-400 font-medium">
+                    Quick Preview
+                  </span>
+                  {previewStatus.size_mb && (
+                    <span className="text-xs text-gray-500">
+                      {previewStatus.size_mb.toFixed(1)} MB
+                    </span>
+                  )}
+                </div>
+                <p className="text-xs text-gray-500">
+                  This is a rough preview from a single frame. Continue to SfM and Training for full quality.
+                </p>
               </div>
             </div>
           )}

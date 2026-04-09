@@ -11,8 +11,8 @@ from ..database import db_session, get_db
 from ..models import (
     PipelineStep, ExtractSettings, SfmSettings, TrainSettings,
     RefineSettings, MaskSettings, NovelViewSettings,
-    CleanupSettings, SceneConfigResponse, SceneStatsResponse,
-    PortraitSettings,
+    CleanupSettings, HolefillSettings, SceneConfigResponse, SceneStatsResponse,
+    PortraitSettings, AugmentSettings,
 )
 from ..pipeline.task_runner import task_runner
 from ..services import ffmpeg as ffmpeg_svc
@@ -25,9 +25,13 @@ from ..services import masking as mask_svc
 from ..services.sfm_quality import evaluate_sfm_quality, export_sparse_ply
 from ..services import lod as lod_svc
 from ..services import coverage as coverage_svc
+from ..services import aov as aov_svc
 from ..services import portrait as portrait_svc
+from ..services import novel_views as novel_views_svc
+from ..services import quick_preview as quick_preview_svc
 from ..services.scene_analysis import analyze_scene
 from ..services.cleanup import run_cleanup
+from ..services.holefill import run_holefill
 from ..ws.manager import manager
 
 logger = logging.getLogger(__name__)
@@ -359,6 +363,103 @@ async def generate_novel_views(project_id: str, body: NovelViewSettings | None =
 
     asyncio.create_task(run())
     return {"status": "started", "model": body.model}
+
+
+@router.post("/augment-views")
+async def augment_views(project_id: str, body: AugmentSettings | None = None):
+    """Generate synthetic novel views via depth-based warping to augment training data."""
+    body = body or AugmentSettings()
+    proj = _project_dir(project_id)
+    frames_dir = proj / "frames"
+
+    if not frames_dir.exists() or not any(frames_dir.glob("*.jpg")):
+        raise HTTPException(400, "No frames -- extract frames first")
+
+    # Reject if a task is already running
+    if task_runner.is_running(project_id):
+        raise HTTPException(409, "A pipeline task is already running for this project")
+
+    async def run():
+        try:
+            await manager.send_progress(project_id, step="augment_views", substep="starting", percent=0)
+            await manager.send_log(
+                project_id,
+                f"[INFO] Augmenting views: {body.num_views_per_frame} views/frame, "
+                f"angle_range={body.angle_range}, max_source_frames={body.max_source_frames}",
+            )
+
+            def on_progress(msg: str, pct: float):
+                asyncio.get_event_loop().call_soon_threadsafe(
+                    lambda: asyncio.ensure_future(
+                        manager.send_progress(
+                            project_id, step="augment_views",
+                            substep=msg, percent=pct,
+                        )
+                    )
+                )
+
+            # Run in a thread since depth estimation is CPU/GPU-bound
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None,
+                lambda: novel_views_svc.generate_novel_views(
+                    project_dir=proj,
+                    num_views_per_frame=body.num_views_per_frame,
+                    angle_range=body.angle_range,
+                    max_source_frames=body.max_source_frames,
+                    on_progress=on_progress,
+                ),
+            )
+
+            await manager.send_log(
+                project_id,
+                f"[INFO] View augmentation complete: {result.views_generated} synthetic views "
+                f"from {result.source_frames_used} source frames",
+            )
+            await manager.send_progress(
+                project_id, step="augment_views", substep="complete", percent=100,
+            )
+        except Exception as e:
+            logger.exception(f"View augmentation failed for {project_id}")
+            await manager.send_log(project_id, f"[ERROR] View augmentation failed: {e}")
+            await manager.send_progress(
+                project_id, step="augment_views", substep="failed", percent=0,
+            )
+
+    asyncio.create_task(run())
+    return {"status": "started"}
+
+
+@router.get("/augment-views/list")
+async def list_synthetic_views(project_id: str):
+    """Return list of generated synthetic view images for preview."""
+    proj = _project_dir(project_id)
+    synth_dir = proj / "frames" / "synthetic"
+
+    if not synth_dir.exists():
+        return {"views": [], "count": 0}
+
+    views = []
+    for f in sorted(synth_dir.glob("synth_*.jpg")):
+        views.append({
+            "name": f.name,
+            "url": f"/api/projects/{project_id}/frames/synthetic/{f.name}",
+        })
+
+    return {"views": views, "count": len(views)}
+
+
+@router.post("/augment-views/clear")
+async def clear_synthetic_views(project_id: str):
+    """Remove all synthetic views."""
+    proj = _project_dir(project_id)
+    synth_dir = proj / "frames" / "synthetic"
+
+    if synth_dir.exists():
+        shutil.rmtree(synth_dir)
+        logger.info("Cleared synthetic views for project %s", project_id)
+
+    return {"status": "cleared"}
 
 
 @router.post("/sfm")
@@ -1023,6 +1124,116 @@ async def undo_cleanup(project_id: str):
     return {"status": "restored"}
 
 
+# ---------------------------------------------------------------------------
+# Hole-fill endpoints
+# ---------------------------------------------------------------------------
+
+
+@router.post("/holefill")
+async def run_holefill_endpoint(project_id: str, body: HolefillSettings | None = None):
+    body = body or HolefillSettings()
+    proj = _project_dir(project_id)
+    if not proj.exists():
+        raise HTTPException(404, "Project not found")
+
+    output_dir = proj / "output"
+    # Always target the canonical model, never LOD derivatives
+    ply_path = output_dir / "point_cloud.ply"
+    if not ply_path.exists():
+        # Fallback: check in ply/ subdirectory (portrait mode)
+        ply_path = output_dir / "ply" / "point_cloud.ply"
+    if not ply_path.exists():
+        raise HTTPException(400, "No training output (point_cloud.ply) found")
+
+    async def run():
+        loop = asyncio.get_event_loop()
+        try:
+            await manager.send_status(project_id, "holefill", "running")
+
+            async def on_progress(msg: str, pct: float):
+                await manager.send_progress(project_id, "holefill", "filling", pct)
+                await manager.send_log(project_id, msg)
+
+            def sync_progress(msg: str, pct: float):
+                asyncio.run_coroutine_threadsafe(on_progress(msg, pct), loop)
+
+            stats = await loop.run_in_executor(
+                None,
+                lambda: run_holefill(
+                    ply_path,
+                    grid_resolution=body.grid_resolution,
+                    min_hole_size=body.min_hole_size,
+                    max_hole_size=body.max_hole_size,
+                    fill_density=body.fill_density,
+                    on_progress=sync_progress,
+                ),
+            )
+
+            # Store holefill stats in DB
+            stats_json = json.dumps(stats.to_dict())
+            async with db_session() as db_hf:
+                await db_hf.execute(
+                    "UPDATE projects SET holefill_stats = ? WHERE id = ?",
+                    (stats_json, project_id),
+                )
+
+            await manager.send_status(project_id, "holefill", "completed")
+            await manager.broadcast(project_id, {
+                "type": "holefill_complete",
+                **stats.to_dict(),
+            })
+
+        except Exception as e:
+            logger.exception("Holefill failed for %s", project_id)
+            await manager.send_status(project_id, "holefill", "failed", str(e))
+
+    asyncio.create_task(run())
+    return {"status": "started"}
+
+
+@router.get("/holefill/stats")
+async def get_holefill_stats(project_id: str):
+    async with db_session() as db:
+        cursor = await db.execute(
+            "SELECT holefill_stats FROM projects WHERE id = ?", (project_id,)
+        )
+        row = await cursor.fetchone()
+        if not row:
+            raise HTTPException(404, "Project not found")
+        raw = row["holefill_stats"]
+        if not raw:
+            return {"has_stats": False}
+        return {"has_stats": True, **json.loads(raw)}
+
+
+@router.post("/holefill/undo")
+async def undo_holefill(project_id: str):
+    proj = _project_dir(project_id)
+    if not proj.exists():
+        raise HTTPException(404, "Project not found")
+
+    output_dir = proj / "output"
+    # Check canonical location first, then portrait subdirectory
+    backup_path = output_dir / "point_cloud_pre_holefill.ply"
+    if not backup_path.exists():
+        backup_path = output_dir / "ply" / "point_cloud_pre_holefill.ply"
+    if not backup_path.exists():
+        raise HTTPException(400, "No holefill backup found")
+
+    ply_path = backup_path.parent / "point_cloud.ply"
+
+    shutil.copy2(backup_path, ply_path)
+    backup_path.unlink()
+
+    async with db_session() as db:
+        await db.execute(
+            "UPDATE projects SET holefill_stats = NULL WHERE id = ?", (project_id,)
+        )
+
+    logger.info("Holefill undone for project %s", project_id)
+    return {"status": "restored"}
+
+
 @router.get("/coverage")
 async def get_coverage(project_id: str):
     proj = _project_dir(project_id)
@@ -1048,6 +1259,71 @@ async def get_coverage(project_id: str):
         ],
         "grid_data": result.grid_data,
     }
+
+
+# ---------------------------------------------------------------------------
+# AOV (Arbitrary Output Variable) endpoints
+# ---------------------------------------------------------------------------
+
+
+@router.post("/aov")
+async def generate_aov_endpoint(project_id: str):
+    """Generate AOV visualizations (depth, scale, opacity, density) in background."""
+    proj = _project_dir(project_id)
+    if not proj.exists():
+        raise HTTPException(404, "Project not found")
+
+    output_dir = proj / "output"
+    ply_path = output_dir / "point_cloud.ply"
+    if not ply_path.exists():
+        ply_path = output_dir / "ply" / "point_cloud.ply"
+    if not ply_path.exists():
+        raise HTTPException(400, "No training output (point_cloud.ply) found")
+
+    async def run():
+        loop = asyncio.get_event_loop()
+        try:
+            await manager.send_status(project_id, "aov", "running")
+            await manager.send_log(project_id, "[AOV] Generating visualizations...")
+
+            result = await loop.run_in_executor(
+                None, aov_svc.generate_aov, proj, None
+            )
+
+            # Store AOV metadata as JSON in a sidecar file
+            aov_dir = proj / "output" / "aov"
+            meta_path = aov_dir / "aov_meta.json"
+            meta_path.write_text(json.dumps(result, indent=2))
+
+            await manager.send_status(project_id, "aov", "completed")
+            await manager.send_log(
+                project_id,
+                f"[AOV] Complete: {len(result['images'])} images generated"
+            )
+        except Exception as e:
+            logger.exception("AOV generation failed for %s", project_id)
+            await manager.send_status(project_id, "aov", "failed", str(e))
+
+    asyncio.create_task(run())
+    return {"status": "started"}
+
+
+@router.get("/aov/images")
+async def get_aov_images(project_id: str):
+    """Return list of available AOV images with metadata."""
+    proj = _project_dir(project_id)
+    aov_dir = proj / "output" / "aov"
+    meta_path = aov_dir / "aov_meta.json"
+
+    if not meta_path.exists():
+        return {"available": False, "images": [], "stats": None}
+
+    meta = json.loads(meta_path.read_text())
+    # Add URL paths to each image
+    for img in meta.get("images", []):
+        img["url"] = f"/api/projects/{project_id}/output/aov/{img['filename']}"
+
+    return {"available": True, **meta}
 
 
 # ---------------------------------------------------------------------------
@@ -1168,3 +1444,87 @@ async def portrait_depth_preview(project_id: str):
     if not depth_path.exists():
         raise HTTPException(404, "Depth preview not available -- run portrait pipeline first")
     return FileResponse(depth_path, media_type="image/png")
+
+
+# ---------------------------------------------------------------------------
+# Quick Preview (instant rough 3D from a single frame)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/quick-preview")
+async def generate_quick_preview(project_id: str):
+    """Generate an instant rough 3D preview from the sharpest extracted frame.
+
+    Does not change the project pipeline step -- this runs independently.
+    """
+    proj = _project_dir(project_id)
+    frames_dir = proj / "frames"
+
+    if not frames_dir.exists() or not any(frames_dir.glob("*.jpg")):
+        raise HTTPException(400, "No extracted frames -- run frame extraction first")
+
+    _loop = asyncio.get_event_loop()
+
+    async def run():
+        try:
+            await manager.send_status(project_id, "quick_preview", "running")
+            await manager.send_log(project_id, "[INFO] Starting quick 3D preview...")
+
+            async def on_progress(msg: str, pct: float):
+                await manager.send_progress(
+                    project_id, "quick_preview", "generating", pct,
+                )
+                await manager.send_log(project_id, f"[preview] {msg}")
+
+            def sync_progress(msg: str, pct: float):
+                asyncio.run_coroutine_threadsafe(on_progress(msg, pct), _loop)
+
+            result = await _loop.run_in_executor(
+                None,
+                lambda: quick_preview_svc.generate_quick_preview(
+                    proj, on_progress=sync_progress,
+                ),
+            )
+
+            await manager.send_status(project_id, "quick_preview", "completed")
+            await manager.broadcast(project_id, {
+                "type": "quick_preview_complete",
+                "num_gaussians": result.num_gaussians,
+                "source_frame": result.source_frame,
+                "processing_time": result.processing_time_seconds,
+            })
+            await manager.send_log(
+                project_id,
+                f"[INFO] Quick preview complete: {result.num_gaussians} Gaussians "
+                f"from {result.source_frame} in {result.processing_time_seconds}s",
+            )
+
+        except Exception as e:
+            logger.exception("Quick preview failed for %s", project_id)
+            await manager.send_status(
+                project_id, "quick_preview", "failed", str(e),
+            )
+            await manager.send_log(
+                project_id, f"[ERROR] Quick preview failed: {e}",
+            )
+
+    asyncio.create_task(run())
+    return {"status": "started"}
+
+
+@router.get("/quick-preview/status")
+async def quick_preview_status(project_id: str):
+    """Check whether a quick preview exists and return its metadata."""
+    proj = _project_dir(project_id)
+    ply_path = proj / "output" / "preview_point_cloud.ply"
+
+    if not ply_path.exists():
+        return {"exists": False}
+
+    size_mb = ply_path.stat().st_size / (1024 * 1024)
+
+    return {
+        "exists": True,
+        "size_mb": round(size_mb, 2),
+        "ply_url": f"/api/projects/{project_id}/output/preview_point_cloud.ply",
+    }

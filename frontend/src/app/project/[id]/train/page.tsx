@@ -5,7 +5,7 @@ import { api } from "@/lib/api";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { useElapsedTimer } from "@/hooks/useElapsedTimer";
 import { LogStream } from "@/components/LogStream";
-import type { ProjectDetail, SceneConfig, TrainSettings } from "@/lib/types";
+import type { ProjectDetail, SceneConfig, TrainSettings, AugmentSettings, SyntheticViewList } from "@/lib/types";
 import {
   Play,
   ArrowRight,
@@ -24,6 +24,9 @@ import {
   Zap,
   Box,
   Eye,
+  Images,
+  Trash2,
+  Info,
 } from "lucide-react";
 import { useCompletionChime } from "@/hooks/useCompletionChime";
 import {
@@ -64,6 +67,16 @@ export default function TrainPage() {
   const [analyzing, setAnalyzing] = useState(false);
   const [analyzed, setAnalyzed] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
+
+  // View augmentation state
+  const [augmentSettings, setAugmentSettings] = useState<AugmentSettings>({
+    num_views_per_frame: 2,
+    angle_range: 15,
+    max_source_frames: 10,
+  });
+  const [augmenting, setAugmenting] = useState(false);
+  const [syntheticViews, setSyntheticViews] = useState<SyntheticViewList | null>(null);
+  const [augmentError, setAugmentError] = useState<string | null>(null);
 
   // Training settings (populated from scene analysis or defaults)
   const [trainSettings, setTrainSettings] = useState<TrainSettings>({
@@ -181,6 +194,53 @@ export default function TrainPage() {
     }
   }, [project, analyzed, analyzing, handleAnalyze]);
 
+  // Load existing synthetic views on mount
+  const refreshSyntheticViews = useCallback(async () => {
+    try {
+      const result = await api.listSyntheticViews(id);
+      setSyntheticViews(result);
+    } catch {
+      // ignore -- no synthetic views yet
+    }
+  }, [id]);
+
+  useEffect(() => {
+    refreshSyntheticViews();
+  }, [refreshSyntheticViews]);
+
+  // Track augmentation progress from WebSocket
+  useEffect(() => {
+    if (progress?.step === "augment_views") {
+      if (progress.substep === "complete") {
+        setAugmenting(false);
+        refreshSyntheticViews();
+      } else if (progress.substep === "failed") {
+        setAugmenting(false);
+        setAugmentError("View augmentation failed -- check logs for details");
+      }
+    }
+  }, [progress, refreshSyntheticViews]);
+
+  const handleAugment = async () => {
+    setAugmenting(true);
+    setAugmentError(null);
+    try {
+      await api.augmentViews(id, augmentSettings);
+    } catch (err: any) {
+      setAugmentError(err.message);
+      setAugmenting(false);
+    }
+  };
+
+  const handleClearSynthetic = async () => {
+    try {
+      await api.clearSyntheticViews(id);
+      setSyntheticViews(null);
+    } catch (err: any) {
+      alert(err.message);
+    }
+  };
+
   const handleTrain = async () => {
     setStarting(true);
     clearLogs();
@@ -293,6 +353,170 @@ export default function TrainPage() {
           <span className="text-sm text-gray-300">
             Analyzing scene characteristics...
           </span>
+        </div>
+      )}
+
+      {/* Augment Views Card */}
+      {!isTraining && !isDone && (project?.step === "sfm_ready" || project?.step === "frames_ready" || project?.step === "failed") && (
+        <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-medium text-gray-300 flex items-center gap-2">
+              <Images className="w-4 h-4 text-indigo-400" />
+              Augment Views
+              {syntheticViews && syntheticViews.count > 0 && (
+                <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-400 border border-indigo-500/30">
+                  {syntheticViews.count} synthetic views
+                </span>
+              )}
+            </h3>
+            {project?.frame_count && (
+              <span className="text-xs text-gray-500">
+                {project.frame_count} source frames
+              </span>
+            )}
+          </div>
+
+          <p className="text-xs text-gray-400 mb-3 flex items-start gap-1.5">
+            <Info className="w-3.5 h-3.5 text-gray-500 mt-0.5 flex-shrink-0" />
+            Synthetic views help fill coverage gaps for better 3D reconstruction.
+            Uses depth estimation to warp existing frames to nearby viewpoints.
+          </p>
+
+          {sceneConfig?.stats && sceneConfig.stats.num_images < 30 && (
+            <div className="bg-amber-500/10 border border-amber-500/30 rounded p-2 mb-3">
+              <p className="text-xs text-amber-400">
+                Coverage gaps detected -- augmenting views can help improve quality
+                with only {sceneConfig.stats.num_images} registered views.
+              </p>
+            </div>
+          )}
+
+          {augmentError && (
+            <div className="bg-red-500/10 border border-red-500/30 rounded p-2 mb-3">
+              <p className="text-xs text-red-400">{augmentError}</p>
+            </div>
+          )}
+
+          {/* Settings */}
+          {!augmenting && (
+            <div className="space-y-2 mb-3">
+              <div className="flex items-center gap-4">
+                <label className="text-xs text-gray-400 w-36">Views per frame:</label>
+                <input
+                  type="range"
+                  min={1}
+                  max={4}
+                  step={1}
+                  value={augmentSettings.num_views_per_frame}
+                  onChange={(e) =>
+                    setAugmentSettings((s) => ({ ...s, num_views_per_frame: Number(e.target.value) }))
+                  }
+                  className="flex-1"
+                />
+                <span className="text-xs text-white w-6 text-right">
+                  {augmentSettings.num_views_per_frame}
+                </span>
+              </div>
+              <div className="flex items-center gap-4">
+                <label className="text-xs text-gray-400 w-36">Angle range:</label>
+                <input
+                  type="range"
+                  min={5}
+                  max={30}
+                  step={1}
+                  value={augmentSettings.angle_range}
+                  onChange={(e) =>
+                    setAugmentSettings((s) => ({ ...s, angle_range: Number(e.target.value) }))
+                  }
+                  className="flex-1"
+                />
+                <span className="text-xs text-white w-6 text-right">
+                  {augmentSettings.angle_range}&deg;
+                </span>
+              </div>
+              <div className="flex items-center gap-4">
+                <label className="text-xs text-gray-400 w-36">Max source frames:</label>
+                <input
+                  type="range"
+                  min={5}
+                  max={20}
+                  step={1}
+                  value={augmentSettings.max_source_frames}
+                  onChange={(e) =>
+                    setAugmentSettings((s) => ({ ...s, max_source_frames: Number(e.target.value) }))
+                  }
+                  className="flex-1"
+                />
+                <span className="text-xs text-white w-6 text-right">
+                  {augmentSettings.max_source_frames}
+                </span>
+              </div>
+            </div>
+          )}
+
+          {/* Progress bar during augmentation */}
+          {augmenting && progress?.step === "augment_views" && (
+            <div className="mb-3">
+              <div className="flex justify-between text-xs text-gray-400 mb-1">
+                <span>{progress.substep || "Generating..."}</span>
+                <span>{Math.round(progress.percent ?? 0)}%</span>
+              </div>
+              <div className="w-full bg-gray-700 rounded-full h-2">
+                <div
+                  className="bg-indigo-500 h-2 rounded-full transition-all"
+                  style={{ width: `${progress.percent ?? 0}%` }}
+                />
+              </div>
+            </div>
+          )}
+
+          {/* Preview grid of synthetic views */}
+          {syntheticViews && syntheticViews.count > 0 && !augmenting && (
+            <div className="mb-3">
+              <div className="flex gap-2 overflow-x-auto pb-2">
+                {syntheticViews.views.slice(0, 8).map((view) => (
+                  <img
+                    key={view.name}
+                    src={view.url}
+                    alt={view.name}
+                    className="w-24 h-16 object-cover rounded border border-gray-600 flex-shrink-0"
+                  />
+                ))}
+                {syntheticViews.count > 8 && (
+                  <div className="w-24 h-16 rounded border border-gray-600 flex-shrink-0 flex items-center justify-center bg-gray-700/50">
+                    <span className="text-xs text-gray-400">
+                      +{syntheticViews.count - 8} more
+                    </span>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Action buttons */}
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleAugment}
+              disabled={augmenting}
+              className="bg-indigo-600 hover:bg-indigo-700 disabled:bg-gray-700 text-white text-sm px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition"
+            >
+              {augmenting ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Images className="w-3.5 h-3.5" />
+              )}
+              {augmenting ? "Generating..." : syntheticViews?.count ? "Regenerate" : "Generate Synthetic Views"}
+            </button>
+            {syntheticViews && syntheticViews.count > 0 && !augmenting && (
+              <button
+                onClick={handleClearSynthetic}
+                className="text-gray-400 hover:text-red-400 text-sm px-3 py-1.5 rounded-lg border border-gray-600 hover:border-red-500/50 flex items-center gap-1.5 transition"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                Clear
+              </button>
+            )}
+          </div>
         </div>
       )}
 

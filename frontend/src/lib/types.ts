@@ -189,6 +189,22 @@ export interface PortraitSettings {
   include_background?: boolean;
 }
 
+export interface AugmentSettings {
+  num_views_per_frame: number;
+  angle_range: number;
+  max_source_frames: number;
+}
+
+export interface SyntheticView {
+  name: string;
+  url: string;
+}
+
+export interface SyntheticViewList {
+  views: SyntheticView[];
+  count: number;
+}
+
 export interface CleanupStats {
   has_stats: boolean;
   original_count?: number;
@@ -196,4 +212,63 @@ export interface CleanupStats {
   total_removed?: number;
   removal_pct?: number;
   filters?: CleanupFilterStats[];
+}
+
+// Hole-fill types
+export interface HolefillSettings {
+  grid_resolution?: number;
+  min_hole_size?: number;
+  max_hole_size?: number;
+  fill_density?: number;
+}
+
+export interface HolefillStats {
+  has_stats: boolean;
+  holes_detected?: number;
+  holes_filled?: number;
+  gaussians_added?: number;
+  original_count?: number;
+  final_count?: number;
+  hole_locations?: { center: number[]; size: number }[];
+}
+
+// AOV (Arbitrary Output Variable) types
+export interface AOVImage {
+  filename: string;
+  channel: string;
+  direction: string;
+  url?: string;
+}
+
+export interface AOVStats {
+  gaussian_count: number;
+  scale_mean: number;
+  scale_median: number;
+  scale_std: number;
+  opacity_mean: number;
+  opacity_median: number;
+  opacity_std: number;
+  bbox_min: number[];
+  bbox_max: number[];
+  bbox_extent: number[];
+  density_mean: number;
+  density_max: number;
+}
+
+export interface AOVResult {
+  available: boolean;
+  images: AOVImage[];
+  stats: AOVStats | null;
+}
+
+export interface QuickPreviewStatus {
+  exists: boolean;
+  size_mb?: number;
+  ply_url?: string;
+}
+
+export interface QuickPreviewComplete {
+  num_gaussians: number;
+  source_frame: string;
+  processing_time: number;
 }

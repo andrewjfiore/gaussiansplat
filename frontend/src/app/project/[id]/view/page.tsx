@@ -6,8 +6,9 @@ import { SplatViewer } from "@/components/SplatViewer";
 import { SplatViewerFPS } from "@/components/SplatViewerFPS";
 import TemporalViewer from "@/components/TemporalViewer";
 import { CoveragePanel } from "@/components/CoveragePanel";
+import { AOVPanel } from "@/components/AOVPanel";
 import { QRCodeSVG } from "qrcode.react";
-import type { ProjectDetail, TemporalInfo, CleanupStats } from "@/lib/types";
+import type { ProjectDetail, TemporalInfo, CleanupStats, HolefillStats } from "@/lib/types";
 
 type ViewMode = "orbit" | "fps";
 
@@ -25,11 +26,20 @@ export default function ViewPage() {
   const [temporalInfo, setTemporalInfo] = useState<TemporalInfo | null>(null);
   const [show4D, setShow4D]         = useState(false);
   const [showCoverage, setShowCoverage] = useState(false);
+  const [showAov, setShowAov] = useState(false);
 
   // Cleanup state
   const [cleanupRunning, setCleanupRunning] = useState(false);
   const [cleanupStats, setCleanupStats] = useState<CleanupStats | null>(null);
   const [cleanupError, setCleanupError] = useState<string | null>(null);
+
+  // Holefill state
+  const [holefillRunning, setHolefillRunning] = useState(false);
+  const [holefillStats, setHolefillStats] = useState<HolefillStats | null>(null);
+  const [holefillError, setHolefillError] = useState<string | null>(null);
+  const [showHolefillSettings, setShowHolefillSettings] = useState(false);
+  const [holefillDensity, setHolefillDensity] = useState(1.0);
+  const [holefillResolution, setHolefillResolution] = useState(64);
 
   useEffect(() => {
     api.getProject(id).then((p) => {
@@ -85,6 +95,15 @@ export default function ViewPage() {
     api.getCleanupStats(id).then((stats) => {
       if (stats.has_stats) {
         setCleanupStats(stats);
+      }
+    }).catch(() => {
+      // No stats yet -- that's fine
+    });
+
+    // Fetch existing holefill stats
+    api.getHolefillStats(id).then((stats) => {
+      if (stats.has_stats) {
+        setHolefillStats(stats);
       }
     }).catch(() => {
       // No stats yet -- that's fine
@@ -151,6 +170,74 @@ export default function ViewPage() {
       );
     } catch (err: any) {
       setCleanupError(err.message || "Failed to undo cleanup");
+    }
+  }, [id]);
+
+  // Listen for holefill completion via WebSocket
+  useEffect(() => {
+    if (!holefillRunning) return;
+
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const wsUrl = `${protocol}//${window.location.host}/ws/projects/${id}/logs`;
+    const ws = new WebSocket(wsUrl);
+
+    ws.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        if (msg.type === "holefill_complete") {
+          setHolefillRunning(false);
+          setShowHolefillSettings(false);
+          setHolefillStats({
+            has_stats: true,
+            holes_detected: msg.holes_detected,
+            holes_filled: msg.holes_filled,
+            gaussians_added: msg.gaussians_added,
+            original_count: msg.original_count,
+            final_count: msg.final_count,
+            hole_locations: msg.hole_locations,
+          });
+          // Reload the viewer with filled model
+          setPlyUrl(
+            `/api/projects/${id}/output/point_cloud.ply?t=${Date.now()}`
+          );
+        } else if (msg.type === "status" && msg.step === "holefill" && msg.state === "failed") {
+          setHolefillRunning(false);
+          setHolefillError(msg.error || "Hole filling failed");
+        }
+      } catch {
+        // ignore parse errors
+      }
+    };
+
+    return () => {
+      ws.close();
+    };
+  }, [holefillRunning, id]);
+
+  const handleHolefill = useCallback(async () => {
+    setHolefillRunning(true);
+    setHolefillError(null);
+    try {
+      await api.runHolefill(id, {
+        fill_density: holefillDensity,
+        grid_resolution: holefillResolution,
+      });
+    } catch (err: any) {
+      setHolefillRunning(false);
+      setHolefillError(err.message || "Failed to start hole filling");
+    }
+  }, [id, holefillDensity, holefillResolution]);
+
+  const handleUndoHolefill = useCallback(async () => {
+    try {
+      await api.undoHolefill(id);
+      setHolefillStats(null);
+      // Reload viewer with restored original
+      setPlyUrl(
+        `/api/projects/${id}/output/point_cloud.ply?t=${Date.now()}`
+      );
+    } catch (err: any) {
+      setHolefillError(err.message || "Failed to undo hole fill");
     }
   }, [id]);
 
@@ -230,6 +317,94 @@ export default function ViewPage() {
             </button>
           )}
 
+          {/* Fill Gaps button */}
+          {!holefillStats && (
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setShowHolefillSettings((v) => !v)}
+                disabled={holefillRunning}
+                className={
+                  "px-3 py-1.5 text-sm rounded-lg border transition-colors " +
+                  (holefillRunning
+                    ? "bg-gray-700 border-gray-600 text-gray-400 cursor-not-allowed"
+                    : showHolefillSettings
+                    ? "bg-teal-600 border-teal-500 text-white"
+                    : "bg-teal-700 border-teal-600 text-white hover:bg-teal-600")
+                }
+              >
+                {holefillRunning ? (
+                  <span className="flex items-center gap-2">
+                    <span className="animate-spin w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full inline-block" />
+                    Filling...
+                  </span>
+                ) : (
+                  "Fill Gaps"
+                )}
+              </button>
+
+              {/* Settings popover */}
+              {showHolefillSettings && !holefillRunning && (
+                <div className="absolute right-0 top-full mt-2 w-64 bg-gray-900 border border-gray-700 rounded-lg shadow-xl p-4 z-50">
+                  <div className="space-y-3">
+                    <div>
+                      <label className="block text-xs text-gray-400 mb-1">
+                        Fill Density: {holefillDensity.toFixed(1)}
+                      </label>
+                      <input
+                        type="range"
+                        min="0.5"
+                        max="2.0"
+                        step="0.1"
+                        value={holefillDensity}
+                        onChange={(e) => setHolefillDensity(parseFloat(e.target.value))}
+                        className="w-full accent-teal-500"
+                      />
+                      <div className="flex justify-between text-[10px] text-gray-500">
+                        <span>Sparse</span>
+                        <span>Dense</span>
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs text-gray-400 mb-1">
+                        Grid Resolution
+                      </label>
+                      <select
+                        value={holefillResolution}
+                        onChange={(e) => setHolefillResolution(parseInt(e.target.value))}
+                        className="w-full bg-gray-800 border border-gray-600 rounded px-2 py-1 text-sm text-gray-200"
+                      >
+                        <option value={32}>32 (Fast)</option>
+                        <option value={64}>64 (Default)</option>
+                        <option value={128}>128 (Fine)</option>
+                      </select>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={handleHolefill}
+                      className="w-full px-3 py-1.5 text-sm rounded-lg bg-teal-600 border border-teal-500 text-white hover:bg-teal-500 transition-colors"
+                    >
+                      Fill Gaps
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Undo Fill button (shown after holefill) */}
+          {holefillStats && (
+            <button
+              type="button"
+              onClick={handleUndoHolefill}
+              className="px-3 py-1.5 text-sm rounded-lg border bg-gray-800 border-gray-700 text-gray-300 hover:bg-gray-700 hover:text-white transition-colors"
+            >
+              Undo Fill
+            </button>
+          )}
+
           {/* Coverage toggle */}
           <button
             type="button"
@@ -242,6 +417,20 @@ export default function ViewPage() {
             }
           >
             Coverage
+          </button>
+
+          {/* AOV Inspect toggle */}
+          <button
+            type="button"
+            onClick={() => setShowAov((v) => !v)}
+            className={
+              "px-3 py-1.5 text-sm rounded-lg border transition-colors " +
+              (showAov
+                ? "bg-purple-600 border-purple-500 text-white"
+                : "bg-gray-800 border-gray-700 text-gray-300 hover:bg-gray-700 hover:text-white")
+            }
+          >
+            Inspect
           </button>
 
           {!show4D && (
@@ -323,6 +512,51 @@ export default function ViewPage() {
         </div>
       )}
 
+      {/* Holefill stats banner */}
+      {holefillStats && holefillStats.has_stats && (
+        <div className="rounded-lg border border-teal-800 bg-teal-950/50 p-3">
+          <div className="flex items-start justify-between">
+            <div>
+              <p className="text-sm font-medium text-teal-400">
+                Gap Filling Complete
+              </p>
+              <p className="text-sm text-teal-300/80 mt-0.5">
+                Found{" "}
+                <span className="font-semibold text-teal-300">
+                  {holefillStats.holes_detected}
+                </span>{" "}
+                holes, added{" "}
+                <span className="font-semibold text-teal-300">
+                  {holefillStats.gaussians_added?.toLocaleString()}
+                </span>{" "}
+                Gaussians
+                {holefillStats.original_count ? (
+                  <>
+                    {" "}(
+                    <span className="font-semibold text-teal-300">
+                      {(
+                        ((holefillStats.gaussians_added || 0) /
+                          holefillStats.original_count) *
+                        100
+                      ).toFixed(1)}
+                      %
+                    </span>{" "}
+                    increase)
+                  </>
+                ) : null}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Holefill error banner */}
+      {holefillError && (
+        <div className="rounded-lg border border-red-800 bg-red-950/50 p-3">
+          <p className="text-sm text-red-400">{holefillError}</p>
+        </div>
+      )}
+
       {/* Quest panel */}
       {showQuest && questViewUrl && (
         <div className="border border-gray-700 rounded-lg p-4 bg-gray-900 flex gap-6 items-start">
@@ -377,9 +611,9 @@ export default function ViewPage() {
         </div>
       )}
 
-      {/* Viewer + coverage panel */}
+      {/* Viewer + side panels */}
       <div className="flex gap-4">
-        <div className={showCoverage ? "flex-1 min-w-0" : "w-full"}>
+        <div className={showCoverage || showAov ? "flex-1 min-w-0" : "w-full"}>
           <div className={show4D || viewMode === "fps" ? "h-screen" : "h-[600px]"}>
             {show4D && is4D ? (
               <TemporalViewer projectId={id} frameCount={temporalInfo.frame_count} />
@@ -396,10 +630,15 @@ export default function ViewPage() {
           </div>
         </div>
 
-        {/* Coverage side panel */}
-        {showCoverage && (
-          <div className="w-[340px] shrink-0 max-h-[600px] overflow-y-auto">
-            <CoveragePanel projectId={id} visible={showCoverage} />
+        {/* Side panels */}
+        {(showCoverage || showAov) && (
+          <div className="w-[340px] shrink-0 max-h-[600px] overflow-y-auto space-y-4">
+            {showCoverage && (
+              <CoveragePanel projectId={id} visible={showCoverage} />
+            )}
+            {showAov && (
+              <AOVPanel projectId={id} visible={showAov} />
+            )}
           </div>
         )}
       </div>

@@ -263,6 +263,14 @@ async def list_frames(project_id: str):
     return [{"name": img.name, "url": f"/api/projects/{project_id}/frames/{img.name}"} for img in imgs]
 
 
+@router.get("/{project_id}/frames/synthetic/{filename}")
+async def get_synthetic_frame(project_id: str, filename: str):
+    path = _project_dir(project_id) / "frames" / "synthetic" / filename
+    if not path.exists():
+        raise HTTPException(404)
+    return FileResponse(path, media_type="image/jpeg")
+
+
 @router.get("/{project_id}/frames/{filename}")
 async def get_frame(project_id: str, filename: str):
     path = _project_dir(project_id) / "frames" / filename
