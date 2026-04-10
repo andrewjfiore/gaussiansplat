@@ -11,17 +11,22 @@ import {
   Download,
   Copy,
   Palette,
+  Layers,
+  ChevronDown,
 } from "lucide-react";
+import { api, type LodInfo } from "@/lib/api";
 
 /* ---------- types ---------- */
 
 interface Props {
   plyUrl: string;
   ksplatUrl?: string;
+  projectId?: string;
   onScreenshot?: (dataUrl: string) => void;
 }
 
 type BgMode = "black" | "darkgray" | "white" | "checker";
+type LodMode = "auto" | "preview" | "medium" | "full";
 
 const BG_CYCLE: BgMode[] = ["black", "darkgray", "white", "checker"];
 
@@ -29,7 +34,7 @@ const BG_COLORS: Record<BgMode, string> = {
   black: "#000000",
   darkgray: "#1a1a1a",
   white: "#ffffff",
-  checker: "#1a1a1a", // base for the checker pattern
+  checker: "#1a1a1a",
 };
 
 const BG_LABELS: Record<BgMode, string> = {
@@ -37,6 +42,19 @@ const BG_LABELS: Record<BgMode, string> = {
   darkgray: "Dark Gray",
   white: "White",
   checker: "Checkerboard",
+};
+
+const LOD_LABELS: Record<number, string> = {
+  0: "Preview",
+  1: "Medium",
+  2: "Full Quality",
+};
+
+const LOD_MODE_LABELS: Record<LodMode, string> = {
+  auto: "Auto (Progressive)",
+  preview: "Preview Only",
+  medium: "Medium",
+  full: "Full Quality",
 };
 
 const INITIAL_CAMERA_POSITION = [0, 0, 5] as const;
@@ -71,14 +89,112 @@ function IconButton({
   );
 }
 
+/* ---------- LOD badge ---------- */
+
+function LodBadge({
+  currentLod,
+  targetLod,
+  upgrading,
+}: {
+  currentLod: number;
+  targetLod: number;
+  upgrading: boolean;
+}) {
+  const label = LOD_LABELS[currentLod] ?? "Loading";
+  const isPreview = currentLod < 2;
+
+  return (
+    <div
+      className={
+        "flex items-center gap-1.5 px-2 py-1 rounded-md text-xs font-medium select-none " +
+        (currentLod === 2
+          ? "bg-green-600/80 text-white"
+          : currentLod === 1
+          ? "bg-blue-600/80 text-white"
+          : "bg-amber-600/80 text-white")
+      }
+    >
+      <Layers className="w-3 h-3" />
+      <span>{label}</span>
+      {upgrading && isPreview && (
+        <span className="inline-block w-1.5 h-1.5 rounded-full bg-white animate-pulse" />
+      )}
+    </div>
+  );
+}
+
+/* ---------- LOD quality selector dropdown ---------- */
+
+function LodSelector({
+  mode,
+  onChange,
+  hasLod,
+}: {
+  mode: LodMode;
+  onChange: (mode: LodMode) => void;
+  hasLod: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+
+  if (!hasLod) return null;
+
+  const modes: LodMode[] = ["auto", "preview", "medium", "full"];
+
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center gap-1 px-2 py-1 rounded-md text-xs text-white/80 hover:text-white hover:bg-white/15 transition-colors"
+        title="Quality setting"
+      >
+        <Layers className="w-3.5 h-3.5" />
+        <span className="hidden sm:inline">{LOD_MODE_LABELS[mode].split(" ")[0]}</span>
+        <ChevronDown className="w-3 h-3" />
+      </button>
+
+      {open && (
+        <>
+          <div
+            className="fixed inset-0 z-40"
+            onClick={() => setOpen(false)}
+          />
+          <div className="absolute right-0 top-full mt-1 w-44 rounded-lg bg-gray-900/95 backdrop-blur border border-white/10 shadow-xl py-1 z-50">
+            {modes.map((m) => (
+              <button
+                key={m}
+                type="button"
+                onClick={() => {
+                  onChange(m);
+                  setOpen(false);
+                }}
+                className={
+                  "flex items-center gap-2 px-3 py-2 text-sm w-full text-left transition-colors " +
+                  (m === mode
+                    ? "text-white bg-white/10"
+                    : "text-white/70 hover:text-white hover:bg-white/5")
+                }
+              >
+                {LOD_MODE_LABELS[m]}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 /* ---------- main component ---------- */
 
-export function SplatViewer({ plyUrl, ksplatUrl, onScreenshot }: Props) {
+export function SplatViewer({ plyUrl, ksplatUrl, projectId, onScreenshot }: Props) {
   /* refs */
-  const outerRef = useRef<HTMLDivElement>(null); // fullscreen target
-  const containerRef = useRef<HTMLDivElement>(null); // viewer root
+  const outerRef = useRef<HTMLDivElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
   const viewerRef = useRef<any>(null);
   const threeRendererRef = useRef<any>(null);
+  const disposedRef = useRef(false);
+  const currentLodLoadedRef = useRef(-1);
 
   /* state */
   const [loading, setLoading] = useState(true);
@@ -88,77 +204,285 @@ export function SplatViewer({ plyUrl, ksplatUrl, onScreenshot }: Props) {
   const [exportOpen, setExportOpen] = useState(false);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
 
+  /* LOD state */
+  const [lodInfo, setLodInfo] = useState<LodInfo | null>(null);
+  const [currentLod, setCurrentLod] = useState(-1);
+  const [targetLod, setTargetLod] = useState(2);
+  const [lodMode, setLodMode] = useState<LodMode>("auto");
+  const [upgrading, setUpgrading] = useState(false);
+
   /* ---------- toast helper ---------- */
   const toast = useCallback((msg: string) => {
     setToastMsg(msg);
     setTimeout(() => setToastMsg(null), 2000);
   }, []);
 
-  /* ---------- init viewer ---------- */
+  /* ---------- fetch LOD info ---------- */
   useEffect(() => {
-    if (!containerRef.current) return;
+    if (!projectId) return;
+    api.getLodInfo(projectId).then(setLodInfo).catch(() => {
+      // LOD not available, use fallback
+      setLodInfo(null);
+    });
+  }, [projectId]);
 
-    let disposed = false;
+  /* ---------- create / destroy viewer ---------- */
+  const createViewer = useCallback(
+    async (url: string): Promise<any> => {
+      if (!containerRef.current) return null;
 
-    async function init() {
+      const GaussianSplats3D = await import("@mkkellogg/gaussian-splats-3d");
+
+      const viewer = new GaussianSplats3D.Viewer({
+        cameraUp: [0, -1, 0],
+        initialCameraPosition: [...INITIAL_CAMERA_POSITION],
+        initialCameraLookAt: [...INITIAL_CAMERA_LOOK_AT],
+        rootElement: containerRef.current,
+        sharedMemoryForWorkers: false,
+        dynamicScene: false,
+        antialiased: false,
+        devicePixelRatio: 1,
+      });
+
+      // Grab the Three.js renderer
       try {
-        const GaussianSplats3D = await import("@mkkellogg/gaussian-splats-3d");
-        if (disposed || !containerRef.current) return;
+        const renderer =
+          (viewer as any).renderer ??
+          (viewer as any).threeRenderer ??
+          (viewer as any).renderModule?.renderer;
+        if (renderer) threeRendererRef.current = renderer;
+      } catch {
+        /* non-critical */
+      }
 
-        const viewer = new GaussianSplats3D.Viewer({
-          cameraUp: [0, -1, 0],
-          rootElement: containerRef.current,
-          sharedMemoryForWorkers: false,
-          dynamicScene: false,
-          antialiased: false,
-          devicePixelRatio: 1,
-        });
+      await viewer.addSplatScene(url, {
+        showLoadingUI: false,
+        progressiveLoad: true,
+      });
+
+      viewer.start();
+      return viewer;
+    },
+    []
+  );
+
+  const disposeViewer = useCallback(() => {
+    if (viewerRef.current) {
+      try {
+        viewerRef.current.dispose();
+      } catch {
+        /* swallow */
+      }
+      viewerRef.current = null;
+      threeRendererRef.current = null;
+    }
+  }, []);
+
+  /* ---------- save & restore camera state between LOD swaps ---------- */
+  const saveCameraState = useCallback(() => {
+    const viewer = viewerRef.current;
+    if (!viewer) return null;
+    try {
+      const camera =
+        (viewer as any).camera ??
+        (viewer as any).perspectiveCamera ??
+        (viewer as any).controls?.object;
+      const controls =
+        (viewer as any).controls ?? (viewer as any).orbitControls;
+      if (camera && controls?.target) {
+        return {
+          position: [camera.position.x, camera.position.y, camera.position.z],
+          target: [controls.target.x, controls.target.y, controls.target.z],
+        };
+      }
+    } catch {
+      /* best-effort */
+    }
+    return null;
+  }, []);
+
+  const restoreCameraState = useCallback(
+    (state: { position: number[]; target: number[] } | null) => {
+      if (!state) return;
+      const viewer = viewerRef.current;
+      if (!viewer) return;
+      try {
+        const camera =
+          (viewer as any).camera ??
+          (viewer as any).perspectiveCamera ??
+          (viewer as any).controls?.object;
+        const controls =
+          (viewer as any).controls ?? (viewer as any).orbitControls;
+        if (camera) {
+          camera.position.set(...state.position);
+        }
+        if (controls?.target) {
+          controls.target.set(...state.target);
+          controls.update?.();
+        }
+      } catch {
+        /* best-effort */
+      }
+    },
+    []
+  );
+
+  /* ---------- load a specific LOD level ---------- */
+  const loadLod = useCallback(
+    async (level: number) => {
+      if (disposedRef.current || !containerRef.current) return;
+      if (currentLodLoadedRef.current === level) return;
+
+      let url: string;
+      if (projectId && lodInfo?.has_lod) {
+        const lodLevel = lodInfo.levels.find(
+          (l) => l.level === level && l.available
+        );
+        if (lodLevel) {
+          url = api.getLodUrl(projectId, level);
+        } else if (level === 2) {
+          // Full quality fallback -- use ksplat if available
+          url = ksplatUrl || plyUrl;
+        } else {
+          // Requested LOD not available, skip
+          return;
+        }
+      } else {
+        // No LOD available, only load full (prefer ksplat)
+        if (level < 2) return;
+        url = ksplatUrl || plyUrl;
+      }
+
+      // Save camera before swap (if viewer exists)
+      const cameraState = saveCameraState();
+
+      setUpgrading(true);
+
+      try {
+        // Dispose old viewer
+        disposeViewer();
+
+        // Clear container (remove old canvases)
+        if (containerRef.current) {
+          containerRef.current.innerHTML = "";
+        }
+
+        // Create new viewer with this LOD
+        const viewer = await createViewer(url);
+        if (disposedRef.current) {
+          try { viewer?.dispose(); } catch { /* */ }
+          return;
+        }
 
         viewerRef.current = viewer;
+        currentLodLoadedRef.current = level;
+        setCurrentLod(level);
+        setLoading(false);
 
-        // Try to grab the Three.js renderer for screenshots / bg color
-        try {
-          const renderer =
-            (viewer as any).renderer ??
-            (viewer as any).threeRenderer ??
-            (viewer as any).renderModule?.renderer;
-          if (renderer) threeRendererRef.current = renderer;
-        } catch {
-          /* non-critical */
-        }
-
-        const loadUrl = ksplatUrl || plyUrl;
-        await viewer.addSplatScene(loadUrl, {
-          showLoadingUI: true,
-          progressiveLoad: true,
-        });
-
-        if (!disposed) {
-          viewer.start();
-          setLoading(false);
+        // Restore camera after a small delay to let viewer initialize
+        if (cameraState) {
+          setTimeout(() => restoreCameraState(cameraState), 100);
         }
       } catch (err: any) {
-        if (!disposed) {
+        if (!disposedRef.current) {
           setError(err.message || "Failed to load splat viewer");
           setLoading(false);
         }
+      } finally {
+        setUpgrading(false);
+      }
+    },
+    [
+      plyUrl,
+      ksplatUrl,
+      projectId,
+      lodInfo,
+      createViewer,
+      disposeViewer,
+      saveCameraState,
+      restoreCameraState,
+    ]
+  );
+
+  /* ---------- progressive loading orchestration ---------- */
+  useEffect(() => {
+    disposedRef.current = false;
+    currentLodLoadedRef.current = -1;
+    setCurrentLod(-1);
+    setLoading(true);
+    setError(null);
+
+    // Determine what to load based on LOD mode and availability
+    const hasLod = lodInfo?.has_lod ?? false;
+
+    async function progressiveLoad() {
+      if (!hasLod || lodMode === "full") {
+        // No LOD or user wants full: load full directly
+        await loadLod(2);
+        return;
+      }
+
+      if (lodMode === "preview") {
+        await loadLod(0);
+        return;
+      }
+
+      if (lodMode === "medium") {
+        const hasLod1 = lodInfo?.levels.find(
+          (l) => l.level === 1 && l.available
+        );
+        if (hasLod1) {
+          await loadLod(1);
+        } else {
+          await loadLod(2);
+        }
+        return;
+      }
+
+      // Auto mode: progressive upgrade 0 -> 1 -> 2
+      const hasLod0 = lodInfo?.levels.find(
+        (l) => l.level === 0 && l.available
+      );
+      const hasLod1 = lodInfo?.levels.find(
+        (l) => l.level === 1 && l.available
+      );
+
+      if (hasLod0) {
+        await loadLod(0);
+        if (disposedRef.current) return;
+
+        // Wait a moment for user to start interacting, then upgrade
+        await new Promise((r) => setTimeout(r, 1500));
+        if (disposedRef.current) return;
+
+        if (hasLod1) {
+          await loadLod(1);
+          if (disposedRef.current) return;
+          await new Promise((r) => setTimeout(r, 2000));
+          if (disposedRef.current) return;
+        }
+
+        await loadLod(2);
+      } else if (hasLod1) {
+        await loadLod(1);
+        if (disposedRef.current) return;
+        await new Promise((r) => setTimeout(r, 2000));
+        if (disposedRef.current) return;
+        await loadLod(2);
+      } else {
+        await loadLod(2);
       }
     }
 
-    init();
+    progressiveLoad();
 
     return () => {
-      disposed = true;
-      if (viewerRef.current) {
-        try {
-          viewerRef.current.dispose();
-        } catch {
-          /* swallow */
-        }
-        viewerRef.current = null;
-      }
+      disposedRef.current = true;
+      disposeViewer();
     };
-  }, [plyUrl, ksplatUrl]);
+    // We intentionally run this when lodInfo or lodMode changes
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [plyUrl, ksplatUrl, lodInfo, lodMode]);
 
   /* ---------- background color sync ---------- */
   useEffect(() => {
@@ -217,7 +541,6 @@ export function SplatViewer({ plyUrl, ksplatUrl, onScreenshot }: Props) {
       const d = dist(e.touches[0], e.touches[1]);
       const m = mid(e.touches[0], e.touches[1]);
 
-      // pinch-to-zoom: synthesize wheel events
       const delta = lastDist - d;
       if (Math.abs(delta) > 1) {
         const synth = new WheelEvent("wheel", {
@@ -229,7 +552,6 @@ export function SplatViewer({ plyUrl, ksplatUrl, onScreenshot }: Props) {
         target.dispatchEvent(synth);
       }
 
-      // two-finger pan: synthesize pointer-move with right button (viewer uses this for pan)
       const dx = m.x - lastMid.x;
       const dy = m.y - lastMid.y;
       if (Math.abs(dx) > 1 || Math.abs(dy) > 1) {
@@ -285,7 +607,6 @@ export function SplatViewer({ plyUrl, ksplatUrl, onScreenshot }: Props) {
     const viewer = viewerRef.current;
     if (!viewer) return;
     try {
-      // The library exposes camera through the Three.js orbit controls
       const camera =
         (viewer as any).camera ??
         (viewer as any).perspectiveCamera ??
@@ -333,7 +654,6 @@ export function SplatViewer({ plyUrl, ksplatUrl, onScreenshot }: Props) {
 
       onScreenshot?.(dataUrl);
 
-      // Copy to clipboard via blob
       canvas.toBlob(async (blob) => {
         if (!blob) return;
         try {
@@ -342,7 +662,6 @@ export function SplatViewer({ plyUrl, ksplatUrl, onScreenshot }: Props) {
           ]);
           toast("Screenshot copied to clipboard");
         } catch {
-          // Fallback: open in new tab
           const url = URL.createObjectURL(blob);
           window.open(url, "_blank");
           toast("Screenshot opened in new tab");
@@ -390,6 +709,8 @@ export function SplatViewer({ plyUrl, ksplatUrl, onScreenshot }: Props) {
         }
       : { backgroundColor: BG_COLORS[bgMode] };
 
+  const hasLod = lodInfo?.has_lod ?? false;
+
   /* ---------- render ---------- */
   return (
     <div
@@ -400,7 +721,7 @@ export function SplatViewer({ plyUrl, ksplatUrl, onScreenshot }: Props) {
       {/* Three.js mount target */}
       <div ref={containerRef} className="w-full h-full" />
 
-      {/* ───── Toolbar ───── */}
+      {/* ---- Toolbar ---- */}
       {!loading && !error && (
         <div className="absolute top-0 inset-x-0 z-20 flex items-center gap-1 px-2 py-1.5 bg-black/60 backdrop-blur-sm text-sm flex-wrap">
           {/* Reset camera */}
@@ -441,8 +762,20 @@ export function SplatViewer({ plyUrl, ksplatUrl, onScreenshot }: Props) {
             <ZoomOut className="w-4 h-4" />
           </IconButton>
 
+          {/* LOD quality selector */}
+          <LodSelector mode={lodMode} onChange={setLodMode} hasLod={hasLod} />
+
           {/* Spacer */}
           <div className="flex-1" />
+
+          {/* LOD badge */}
+          {hasLod && currentLod >= 0 && (
+            <LodBadge
+              currentLod={currentLod}
+              targetLod={targetLod}
+              upgrading={upgrading}
+            />
+          )}
 
           {/* Export / Share dropdown */}
           <div className="relative">
@@ -481,7 +814,7 @@ export function SplatViewer({ plyUrl, ksplatUrl, onScreenshot }: Props) {
         </div>
       )}
 
-      {/* ───── Close export panel on outside click ───── */}
+      {/* ---- Close export panel on outside click ---- */}
       {exportOpen && (
         <div
           className="absolute inset-0 z-10"
@@ -489,7 +822,7 @@ export function SplatViewer({ plyUrl, ksplatUrl, onScreenshot }: Props) {
         />
       )}
 
-      {/* ───── Mobile touch hint ───── */}
+      {/* ---- Mobile touch hint ---- */}
       {!loading && !error && (
         <div className="absolute bottom-2 inset-x-0 text-center pointer-events-none">
           <span className="text-[11px] text-white/40 sm:hidden">
@@ -498,24 +831,29 @@ export function SplatViewer({ plyUrl, ksplatUrl, onScreenshot }: Props) {
         </div>
       )}
 
-      {/* ───── Toast ───── */}
+      {/* ---- Toast ---- */}
       {toastMsg && (
         <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-30 px-4 py-2 rounded-lg bg-black/80 text-white text-sm backdrop-blur shadow-lg animate-[fadeIn_0.15s_ease]">
           {toastMsg}
         </div>
       )}
 
-      {/* ───── Loading overlay ───── */}
+      {/* ---- Loading overlay ---- */}
       {loading && (
         <div className="absolute inset-0 flex items-center justify-center bg-black/80 text-white z-40">
           <div className="text-center">
             <div className="animate-spin w-8 h-8 border-2 border-white border-t-transparent rounded-full mx-auto mb-3" />
             <p>Loading Gaussian Splat...</p>
+            {hasLod && (
+              <p className="text-white/50 text-xs mt-1">
+                Loading preview for instant interactivity
+              </p>
+            )}
           </div>
         </div>
       )}
 
-      {/* ───── Error overlay ───── */}
+      {/* ---- Error overlay ---- */}
       {error && (
         <div className="absolute inset-0 flex items-center justify-center bg-black/80 text-red-400 z-40">
           <p>{error}</p>

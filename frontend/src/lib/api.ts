@@ -63,6 +63,54 @@ export const api = {
     });
   },
 
+  // Portrait upload
+  uploadPortrait: async (
+    id: string,
+    file: File,
+    onProgress?: (percent: number) => void
+  ) => {
+    return new Promise<any>((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", `/api/projects/${id}/upload-portrait`);
+
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable && onProgress) {
+          onProgress(Math.round((e.loaded / e.total) * 100));
+        }
+      };
+
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            resolve(JSON.parse(xhr.responseText));
+          } catch {
+            resolve({});
+          }
+        } else {
+          reject(new Error(`Upload failed: ${xhr.status} ${xhr.statusText}`));
+        }
+      };
+
+      xhr.onerror = () => reject(new Error("Upload failed: network error"));
+      xhr.ontimeout = () => reject(new Error("Upload failed: timeout"));
+      xhr.timeout = 300000; // 5 min timeout
+
+      const form = new FormData();
+      form.append("file", file);
+      xhr.send(form);
+    });
+  },
+
+  // Portrait pipeline
+  runPortrait: (id: string, opts?: import("@/lib/types").PortraitSettings) =>
+    request<any>(`/api/projects/${id}/pipeline/portrait`, {
+      method: "POST",
+      body: JSON.stringify(opts || {}),
+    }),
+
+  getDepthPreview: (id: string) =>
+    `/api/projects/${id}/portrait/depth-preview`,
+
   downloadSample: (id: string, sampleId: string) => {
     const form = new URLSearchParams();
     form.set("sample_id", sampleId);
@@ -90,7 +138,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify(opts || {}),
     }),
-  train: (id: string, opts?: import("@/lib/types").TrainSettings) =>
+  analyzeScene: (id: string) =>
+    request<import("@/lib/types").SceneConfig>(
+      `/api/projects/${id}/pipeline/scene-analysis`
+    ),
+  train: (id: string, opts?: Partial<import("@/lib/types").TrainSettings>) =>
     request<any>(`/api/projects/${id}/pipeline/train`, {
       method: "POST",
       body: JSON.stringify(opts || {}),
@@ -145,7 +197,7 @@ export const api = {
   listMasks: (id: string) =>
     request<{ name: string; url: string }[]>(`/api/projects/${id}/masks`),
 
-  // Post-processing
+  // Post-processing (pruning)
   prunePreview: (id: string, opts?: {
     min_opacity?: number; max_scale_mult?: number;
     position_percentile?: number; bbox?: string;
@@ -168,6 +220,29 @@ export const api = {
     }),
   pruneReset: (id: string) =>
     request<{ status: string }>(`/api/projects/${id}/prune-reset`, { method: "POST" }),
+
+  // Coverage
+  getCoverage: (id: string) =>
+    request<any>(`/api/projects/${id}/pipeline/coverage`),
+
+  // Cleanup
+  runCleanup: (id: string) =>
+    request<any>(`/api/projects/${id}/pipeline/cleanup`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    }),
+  getCleanupStats: (id: string) =>
+    request<any>(`/api/projects/${id}/pipeline/cleanup/stats`),
+  undoCleanup: (id: string) =>
+    request<any>(`/api/projects/${id}/pipeline/cleanup/undo`, {
+      method: "POST",
+    }),
+
+  // LOD
+  getLodInfo: (id: string) =>
+    request<LodInfo>(`/api/projects/${id}/output/lod/info`),
+  getLodUrl: (id: string, level: number) =>
+    `/api/projects/${id}/output/lod/${level}`,
 
   // Frames
   listFrames: (id: string) => request<any[]>(`/api/projects/${id}/frames`),
@@ -231,6 +306,19 @@ export const api = {
     }
   },
 };
+
+export interface LodLevelInfo {
+  level: number;
+  name: string;
+  filename: string;
+  size_bytes: number;
+  available: boolean;
+}
+
+export interface LodInfo {
+  levels: LodLevelInfo[];
+  has_lod: boolean;
+}
 
 export interface InstallProgress {
   phase: "downloading" | "extracting" | "complete" | "error";

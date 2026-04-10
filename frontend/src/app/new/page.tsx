@@ -2,7 +2,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
-import { Upload, Download, Loader2 } from "lucide-react";
+import { Upload, Download, Loader2, Camera, Video } from "lucide-react";
 
 const SAMPLES = [
   {
@@ -31,8 +31,11 @@ const SAMPLES = [
 export default function NewProjectPage() {
   const router = useRouter();
   const [name, setName] = useState("");
+  const [mode, setMode] = useState<"video" | "portrait">("video");
   const [tab, setTab] = useState<"upload" | "sample">("upload");
   const [files, setFiles] = useState<File[]>([]);
+  const [portraitFile, setPortraitFile] = useState<File | null>(null);
+  const [portraitPreview, setPortraitPreview] = useState<string | null>(null);
   const [selectedSample, setSelectedSample] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -44,12 +47,16 @@ export default function NewProjectPage() {
       setError("Project name is required");
       return;
     }
-    if (tab === "upload" && files.length === 0) {
+    if (mode === "video" && tab === "upload" && files.length === 0) {
       setError("Please select at least one video file");
       return;
     }
-    if (tab === "sample" && !selectedSample) {
+    if (mode === "video" && tab === "sample" && !selectedSample) {
       setError("Please select a sample video");
+      return;
+    }
+    if (mode === "portrait" && !portraitFile) {
+      setError("Please select a portrait image");
       return;
     }
 
@@ -60,6 +67,15 @@ export default function NewProjectPage() {
     try {
       setStatusText("Creating project...");
       const project = await api.createProject(name);
+
+      if (mode === "portrait" && portraitFile) {
+        setStatusText("Uploading portrait...");
+        await api.uploadPortrait(project.id, portraitFile, (pct) => {
+          setUploadPercent(pct);
+        });
+        router.push(`/project/${project.id}/portrait`);
+        return;
+      }
 
       if (tab === "upload" && files.length > 0) {
         for (let i = 0; i < files.length; i++) {
@@ -100,7 +116,40 @@ export default function NewProjectPage() {
           />
         </div>
 
+        {/* Mode toggle: Video vs Portrait */}
         <div>
+          <label className="block text-sm font-medium text-gray-300 mb-2">
+            Input Mode
+          </label>
+          <div className="flex gap-2 mb-4">
+            <button
+              onClick={() => setMode("video")}
+              className={`flex-1 px-4 py-3 rounded-lg text-sm font-medium transition border-2 flex items-center justify-center gap-2 ${
+                mode === "video"
+                  ? "bg-blue-600/10 border-blue-500 text-blue-400"
+                  : "bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-600 hover:text-white"
+              }`}
+            >
+              <Video className="w-4 h-4" />
+              Video Mode
+            </button>
+            <button
+              onClick={() => setMode("portrait")}
+              className={`flex-1 px-4 py-3 rounded-lg text-sm font-medium transition border-2 flex items-center justify-center gap-2 ${
+                mode === "portrait"
+                  ? "bg-violet-600/10 border-violet-500 text-violet-400"
+                  : "bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-600 hover:text-white"
+              }`}
+            >
+              <Camera className="w-4 h-4" />
+              Portrait Mode
+            </button>
+          </div>
+        </div>
+
+        <div>
+          {mode === "video" && (
+          <>
           <div className="flex gap-2 mb-4">
             <button
               onClick={() => setTab("upload")}
@@ -227,6 +276,72 @@ export default function NewProjectPage() {
               ))}
             </div>
           )}
+          </>
+          )}
+
+          {mode === "portrait" && (
+            <div>
+              <div
+                className="border-2 border-dashed border-gray-700 rounded-lg p-8 text-center hover:border-violet-500/50 transition cursor-pointer"
+                onClick={() =>
+                  document.getElementById("portrait-input")?.click()
+                }
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  const dropped = Array.from(e.dataTransfer.files).find((f) =>
+                    f.type.startsWith("image/")
+                  );
+                  if (dropped) {
+                    setPortraitFile(dropped);
+                    setPortraitPreview(URL.createObjectURL(dropped));
+                  }
+                }}
+              >
+                <input
+                  id="portrait-input"
+                  type="file"
+                  accept=".jpg,.jpeg,.png,.webp"
+                  className="hidden"
+                  onChange={(e) => {
+                    const selected = e.target.files?.[0];
+                    if (selected) {
+                      setPortraitFile(selected);
+                      setPortraitPreview(URL.createObjectURL(selected));
+                    }
+                  }}
+                />
+                {portraitPreview ? (
+                  <div className="space-y-2">
+                    <img
+                      src={portraitPreview}
+                      alt="Portrait preview"
+                      className="max-h-48 mx-auto rounded-lg object-contain"
+                    />
+                    <p className="text-white font-medium">
+                      {portraitFile?.name}
+                    </p>
+                    <p className="text-gray-500 text-sm">
+                      {portraitFile
+                        ? `${(portraitFile.size / 1024 / 1024).toFixed(1)} MB`
+                        : ""}
+                      {" -- "}Click or drop to change
+                    </p>
+                  </div>
+                ) : (
+                  <div>
+                    <Camera className="w-10 h-10 text-violet-500/60 mx-auto mb-3" />
+                    <p className="text-gray-400">
+                      Drag & drop a portrait photo or click to browse
+                    </p>
+                    <p className="text-gray-500 text-sm mt-1">
+                      .jpg, .png, .webp -- single photo to 3D
+                    </p>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </div>
 
         {error && (
@@ -238,13 +353,19 @@ export default function NewProjectPage() {
         <button
           onClick={handleCreate}
           disabled={creating}
-          className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-700 disabled:text-gray-400 text-white py-3 rounded-lg font-medium transition flex items-center justify-center gap-2"
+          className={`w-full disabled:bg-gray-700 disabled:text-gray-400 text-white py-3 rounded-lg font-medium transition flex items-center justify-center gap-2 ${
+            mode === "portrait"
+              ? "bg-violet-600 hover:bg-violet-700"
+              : "bg-blue-600 hover:bg-blue-700"
+          }`}
         >
           {creating ? (
             <>
               <Loader2 className="w-4 h-4 animate-spin" />{" "}
               {statusText || "Creating..."}
             </>
+          ) : mode === "portrait" ? (
+            "Create Portrait Project"
           ) : (
             "Create Project"
           )}
