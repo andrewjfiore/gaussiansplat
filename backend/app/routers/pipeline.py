@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException
 
 from ..config import settings
 from ..database import db_session
-from ..models import PipelineStep, ExtractSettings, SfmSettings, TrainSettings, RefineSettings, MaskSettings, NovelViewSettings
+from ..models import PipelineStep, ExtractSettings, SfmSettings, TrainSettings, RefineSettings, MaskSettings, MaskPreviewRequest, NovelViewSettings
 from ..pipeline.task_runner import task_runner
 from ..services import ffmpeg as ffmpeg_svc
 from ..services import colmap as colmap_svc
@@ -240,8 +240,23 @@ async def run_masking(project_id: str, body: MaskSettings | None = None):
     if not frames_dir.exists() or not any(frames_dir.glob("*.jpg")):
         raise HTTPException(400, "No extracted frames — run frame extraction first")
 
-    # Choose masking backend
-    if body.use_external:
+    # Determine mode: point-prompted vs keyword vs external
+    is_point_mode = body.points and body.reference_frame and body.point_labels
+
+    if is_point_mode:
+        cmd = mask_svc.build_point_mask_cmd(
+            frames_dir, masks_dir,
+            reference_frame=body.reference_frame,
+            points=body.points,
+            point_labels=body.point_labels,
+            mode=body.mode, invert=body.invert,
+            expand=body.expand, feather=body.feather,
+        )
+        log_msg = (
+            f"[INFO] Point-prompted masking: {len(body.points)} points "
+            f"on {body.reference_frame}"
+        )
+    elif body.use_external:
         exe = mask_svc.find_automasker_exe()
         if not exe:
             raise HTTPException(
@@ -254,21 +269,27 @@ async def run_masking(project_id: str, body: MaskSettings | None = None):
             mode=body.mode, invert=body.invert,
             precision=body.precision, expand=body.expand, feather=body.feather,
         )
+        log_msg = (
+            f"[INFO] External masking with keywords: {body.keywords} "
+            f"(precision={body.precision})"
+        )
     else:
         cmd = mask_svc.build_builtin_mask_cmd(
             frames_dir, masks_dir, body.keywords,
             mode=body.mode, invert=body.invert,
             precision=body.precision, expand=body.expand, feather=body.feather,
         )
+        log_msg = (
+            f"[INFO] Keyword masking: {body.keywords} "
+            f"(mode={body.mode}, precision={body.precision})"
+        )
+
+    mask_label = f"points:{body.reference_frame}" if is_point_mode else body.keywords
 
     async def run():
         try:
             await _update_step(project_id, PipelineStep.MASKING)
-            await manager.send_log(
-                project_id,
-                f"[INFO] Masking with keywords: {body.keywords} "
-                f"(mode={body.mode}, precision={body.precision})",
-            )
+            await manager.send_log(project_id, log_msg)
             rc = await task_runner.run(
                 project_id, cmd, step="mask", substep="generating",
                 line_parser=mask_svc.parse_mask_line,
@@ -281,7 +302,7 @@ async def run_masking(project_id: str, body: MaskSettings | None = None):
                     await db2.execute(
                         "UPDATE projects SET step = ?, mask_keywords = ?, mask_count = ? "
                         "WHERE id = ?",
-                        (PipelineStep.MASKS_READY.value, body.keywords, mask_count, project_id),
+                        (PipelineStep.MASKS_READY.value, mask_label, mask_count, project_id),
                     )
                 await manager.send_log(
                     project_id, f"[INFO] Masking complete: {mask_count} masks generated"
@@ -294,6 +315,81 @@ async def run_masking(project_id: str, body: MaskSettings | None = None):
 
     asyncio.create_task(run())
     return {"status": "started"}
+
+
+@router.post("/mask-preview")
+async def mask_preview(project_id: str, body: MaskPreviewRequest):
+    """Quick single-frame mask preview from click points. Returns base64 PNG overlay."""
+    import base64
+    import io
+
+    proj = _project_dir(project_id)
+    frames_dir = proj / "frames"
+    frame_path = frames_dir / body.frame
+
+    if not frame_path.exists():
+        raise HTTPException(404, f"Frame not found: {body.frame}")
+
+    if not body.points or not body.labels:
+        raise HTTPException(400, "Must provide points and labels")
+
+    loop = asyncio.get_event_loop()
+
+    def _run_preview():
+        import numpy as np
+        from PIL import Image
+
+        # Import SAM2 predictor inline (heavy import)
+        try:
+            from sam2.sam2_image_predictor import SAM2ImagePredictor
+            import torch
+        except ImportError:
+            return None, "SAM2 not installed"
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        predictor = SAM2ImagePredictor.from_pretrained(
+            "facebook/sam2-hiera-large", device=device,
+        )
+
+        img = np.array(Image.open(frame_path).convert("RGB"))
+        predictor.set_image(img)
+
+        pts = np.array(body.points, dtype=np.float32)
+        lbls = np.array(body.labels, dtype=np.int32)
+
+        masks, scores, _ = predictor.predict(
+            point_coords=pts, point_labels=lbls, multimask_output=True,
+        )
+        best_idx = int(np.argmax(scores))
+        mask = masks[best_idx]
+        if mask.ndim == 3:
+            mask = mask[0]
+
+        # Create semi-transparent purple overlay
+        H, W = mask.shape
+        overlay = np.zeros((H, W, 4), dtype=np.uint8)
+        overlay[mask, 0] = 147  # purple R
+        overlay[mask, 1] = 51   # purple G
+        overlay[mask, 2] = 234  # purple B
+        overlay[mask, 3] = 128  # 50% opacity
+
+        pil_overlay = Image.fromarray(overlay, "RGBA")
+        buf = io.BytesIO()
+        pil_overlay.save(buf, format="PNG")
+        b64 = base64.b64encode(buf.getvalue()).decode()
+
+        # Compute bounding box
+        ys, xs = np.where(mask)
+        bbox = [int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())] if len(ys) > 0 else []
+
+        return b64, bbox
+
+    result = await loop.run_in_executor(None, _run_preview)
+    if result[0] is None:
+        raise HTTPException(500, result[1])
+
+    mask_b64, bbox = result
+    return {"mask_b64": mask_b64, "bbox": bbox}
 
 
 @router.post("/generate-novel-views")

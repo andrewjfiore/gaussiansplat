@@ -7,7 +7,8 @@ import { useElapsedTimer } from "@/hooks/useElapsedTimer";
 import { LogStream } from "@/components/LogStream";
 import { FrameGrid } from "@/components/FrameGrid";
 import type { FrameInfo, ProjectDetail } from "@/lib/types";
-import { Play, ArrowRight, ArrowLeft, Loader2, XCircle, RotateCcw, Clock, Settings2, Volume2, VolumeX, Scissors, Eye } from "lucide-react";
+import { Play, ArrowRight, ArrowLeft, Loader2, XCircle, RotateCcw, Clock, Settings2, Volume2, VolumeX, Scissors, Eye, MousePointer2 } from "lucide-react";
+import { MaskPointSelector } from "@/components/MaskPointSelector";
 import { useCompletionChime } from "@/hooks/useCompletionChime";
 
 const FPS_OPTIONS = [
@@ -39,6 +40,8 @@ export default function FramesPage() {
   const [maskInvert, setMaskInvert] = useState(false);
   const [showMaskSettings, setShowMaskSettings] = useState(false);
   const [maskPreviews, setMaskPreviews] = useState<{ name: string; url: string }[]>([]);
+  const [pointMode, setPointMode] = useState(false);
+  const [pointRefFrame, setPointRefFrame] = useState<{ name: string; url: string } | null>(null);
 
   useEffect(() => { onStepChange(project?.step); }, [project?.step, onStepChange]);
 
@@ -117,6 +120,35 @@ export default function FramesPage() {
       alert(err.message);
     }
     setStarting(false);
+  };
+
+  const handlePointApply = async (points: number[][], labels: number[], refFrame: string) => {
+    setStarting(true);
+    clearLogs();
+    resetTimer();
+    try {
+      await api.runMasking(id, {
+        points,
+        point_labels: labels,
+        reference_frame: refFrame,
+        expand: maskExpand,
+        feather: maskFeather,
+        invert: maskInvert,
+      });
+      setPointMode(false);
+    } catch (err: any) {
+      alert(err.message);
+    }
+    setStarting(false);
+  };
+
+  const handleOpenPointMode = () => {
+    // Use the first frame as reference
+    if (frames.length > 0) {
+      setPointRefFrame(frames[0]);
+      setPointMode(true);
+      setShowMaskSettings(true);
+    }
   };
 
   const handleCancel = async () => {
@@ -268,7 +300,7 @@ export default function FramesPage() {
                   Invert
                 </label>
               </div>
-              <div className="flex gap-2">
+              <div className="flex gap-2 flex-wrap">
                 <button
                   onClick={handleMask}
                   disabled={starting || isBusy || !maskKeywords.trim()}
@@ -282,12 +314,33 @@ export default function FramesPage() {
                   {isMasking ? "Masking..." : masksReady ? "Re-mask" : "Generate Masks"}
                 </button>
                 <button
+                  onClick={handleOpenPointMode}
+                  disabled={starting || isBusy || frames.length === 0}
+                  className="bg-indigo-600 hover:bg-indigo-700 disabled:bg-gray-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 transition text-sm"
+                >
+                  <MousePointer2 className="w-4 h-4" />
+                  {pointMode ? "Point Mode Active" : "Refine with Points"}
+                </button>
+                <button
                   onClick={() => router.push(`/project/${id}/sfm`)}
                   className="bg-gray-600 hover:bg-gray-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 transition text-sm"
                 >
                   Skip Masking <ArrowRight className="w-4 h-4" />
                 </button>
               </div>
+            </div>
+          )}
+
+          {/* Point selector */}
+          {pointMode && pointRefFrame && (
+            <div className="mt-3">
+              <MaskPointSelector
+                projectId={id}
+                frameUrl={pointRefFrame.url}
+                frameName={pointRefFrame.name}
+                onApply={handlePointApply}
+                onClose={() => setPointMode(false)}
+              />
             </div>
           )}
 

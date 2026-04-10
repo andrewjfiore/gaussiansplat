@@ -77,6 +77,16 @@ class MaskSettings(BaseModel):
     expand: int = 0  # expand mask by N pixels
     feather: int = 0  # feather/blur mask edges by N pixels
     use_external: bool = False  # use external AutoMasker exe instead of built-in
+    # Point-prompted mode (overrides keyword mode when set)
+    points: Optional[list[list[float]]] = None  # [[x,y], ...] click coordinates
+    point_labels: Optional[list[int]] = None     # 1=foreground, 0=background per point
+    reference_frame: Optional[str] = None        # frame filename for point selection
+
+
+class MaskPreviewRequest(BaseModel):
+    frame: str                    # frame filename, e.g. "0001.jpg"
+    points: list[list[float]]     # [[x,y], ...]
+    labels: list[int]             # 1=foreground, 0=background
 
 
 class PruneSettings(BaseModel):

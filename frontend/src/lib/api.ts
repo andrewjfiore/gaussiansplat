@@ -127,11 +127,21 @@ export const api = {
     keywords?: string; mode?: string; invert?: boolean;
     precision?: number; expand?: number; feather?: number;
     use_external?: boolean;
+    points?: number[][]; point_labels?: number[]; reference_frame?: string;
   }) =>
     request<any>(`/api/projects/${id}/pipeline/mask`, {
       method: "POST",
       body: JSON.stringify(opts || {}),
     }),
+  maskPreview: (id: string, opts: {
+    frame: string;
+    points: number[][];
+    labels: number[];
+  }) =>
+    request<{ mask_b64: string; bbox: number[] }>(
+      `/api/projects/${id}/pipeline/mask-preview`,
+      { method: "POST", body: JSON.stringify(opts) },
+    ),
   listMasks: (id: string) =>
     request<{ name: string; url: string }[]>(`/api/projects/${id}/masks`),
 
